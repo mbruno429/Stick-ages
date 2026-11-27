@@ -118,6 +118,9 @@ const save = {
   shake: true,       // screen shake on heavy hits
   sideways: false,   // draw rotated when the phone is held upright with rotation lock on
   seenHelp: false,
+  controls: 'swipe', // 'swipe' (tap, swipe, hold anywhere) or 'pad' (stick and buttons)
+  seenMoves: false,  // has the swipe-era help been shown
+  tut: 0,            // how far through the first-fight coaching the player is (99 = finished)
   wins: 0, losses: 0,
   lossTier: 0, lossCount: 0   // losses in a row on one tier: each takes a little off that opponent for the rematch
 };
@@ -308,13 +311,19 @@ const AudioSys = (() => {
     bell() { tone(880, 880, 0.6, 'triangle', 0.26); tone(1320, 1320, 0.45, 'sine', 0.16); tone(2640, 2640, 0.2, 'sine', 0.06); },
     fight() { tone(196, 392, 0.16, 'sawtooth', 0.26); tone(392, 784, 0.2, 'square', 0.14, 0.1); },
     super_() { tone(180, 1500, 0.4, 'sawtooth', 0.26); noise(0.42, 0.3, 500, 6000, 1.4, 'bandpass'); },
+    special() { tone(330, 990, 0.16, 'square', 0.13); tone(660, 1320, 0.14, 'triangle', 0.12, 0.05); noise(0.16, 0.2, 900, 5200, 1.4, 'bandpass'); },
+    flip() { noise(0.2, 0.16, 700, 2600, 1.3, 'bandpass'); tone(300, 520, 0.12, 'sine', 0.07); },
+    launchUp() { tone(160, 620, 0.16, 'triangle', 0.22); noise(0.1, 0.3, 1600, 4200, 1.2, 'bandpass'); },
+    wave() { noise(0.3, 0.3, 2600, 700, 1.6, 'bandpass'); tone(520, 180, 0.24, 'sawtooth', 0.1); },
+    quake() { noise(0.4, 0.8, 500, 60, 0.7); tone(70, 28, 0.4, 'sine', 0.8); },
+    meter() { tone(880, 1320, 0.09, 'triangle', 0.1); tone(1320, 1760, 0.1, 'triangle', 0.08, 0.07); },
     win() { [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.16, 'square', 0.11, i * 0.11)); tone(1319, 1319, 0.4, 'triangle', 0.14, 0.44); },
     lose() { [392, 330, 262, 196].forEach((f, i) => tone(f, f * 0.97, 0.22, 'triangle', 0.14, i * 0.17)); },
     unlock() { [784, 988, 1175, 1568].forEach((f, i) => tone(f, f, 0.14, 'triangle', 0.13, i * 0.07)); },
     tick() { tone(1000, 1000, 0.03, 'square', 0.07); },
     vs() { tone(110, 55, 0.5, 'sawtooth', 0.3); noise(0.4, 0.4, 3000, 200, 0.7); }
   };
-  const MIN_GAP = { hit: 0.03, block: 0.04, shot: 0.03, swing: 0.04, saw: 0.05, boom: 0.06, thud: 0.05, land: 0.05, slice: 0.03 };
+  const MIN_GAP = { flip: 0.05, quake: 0.08, hit: 0.03, block: 0.04, shot: 0.03, swing: 0.04, saw: 0.05, boom: 0.06, thud: 0.05, land: 0.05, slice: 0.03 };
 
   function play(name, a) {
     if (!save.sound || !ac || ac.state !== 'running') return;
@@ -328,33 +337,46 @@ const AudioSys = (() => {
 })();
 const sfx = (name, a) => AudioSys.play(name, a);
 
-// ───────────────────────── input: touch pad, keyboard, menu pointer ─────────────────────────
+// ───────────────────────── input: swipe gestures, touch pad, keyboard, controller, menu pointer ─────────────────────────
 const keys = Object.create(null);
 let keyHits = [];                         // key codes pressed since the last frame
 const ui = { clicks: [], px: -100, py: -100, down: false, drag: null, wheel: 0 };
 const ptrs = new Map();
 const ctl = {
-  on: false,                              // a fight is running and wants the pad
+  on: false,                              // a fight is running and wants the controls
   touchSeen: false,
   stick: { id: null, bx: 0, by: 0, x: 0, y: 0, hx: 0, hy: 0, r: 44 },
   btns: [],
-  zones: [],                              // rects that stay ordinary UI while the pad is on
-  edge: { atk: false, kick: false, dash: false, sup: false }
+  zones: [],                              // rects that stay ordinary UI while the controls are on
+  edge: { atk: false, kick: false, dash: false, sp1: false, sp2: false, sp3: false },
+  swq: [],                                // swipes waiting for the simulation: 1 right, 2 left, 3 up, 4 down
+  marks: []                               // fading touch feedback
 };
 const KEYMAP = {
   KeyJ: 'atk', KeyZ: 'atk', KeyK: 'kick', KeyX: 'kick', KeyL: 'guard', KeyC: 'guard',
-  ShiftLeft: 'dash', ShiftRight: 'dash', KeyI: 'dash', KeyV: 'dash', KeyU: 'sup', Space: 'sup'
+  ShiftLeft: 'dash', ShiftRight: 'dash', KeyV: 'dash', KeyU: 'sp1', KeyI: 'sp2', KeyO: 'sp3', Space: 'sp3'
 };
 const GAME_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'Enter', 'Escape', 'Backspace', 'Tab',
-  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyJ', 'KeyK', 'KeyL', 'KeyU', 'KeyI', 'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyP']);
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyJ', 'KeyK', 'KeyL', 'KeyU', 'KeyI', 'KeyO', 'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyP']);
+// gesture tuning, in logical units (about a CSS pixel on a phone) and milliseconds
+const SW_MIN = 18, SW_TURN = 26, HOLD_MS = 115, TAP_MS = 240;
+const swipeMode = () => save.controls !== 'pad';
 
 function layoutControls() {
   const X = view.W - (Math.max(view.sr * 0.45, 4) + 10);
   const Y = VH - (Math.max(view.sb * 0.6, 6) + 8);
   const k = clamp(view.W / 800, 0.8, 1);                    // tighter cluster on squarer screens
-  const B = (name, dx, dy, r) => ({ name, x: X - dx * k, y: Y - dy * k, r: r * k, held: 0 });
+  const B = (name, x, y, r) => ({ name, x, y, r, held: 0 });
   // everything sits over the floor, below the fighters, so thumbs never cover the action
-  ctl.btns = [B('atk', 50, 50, 33), B('kick', 132, 36, 26), B('guard', 112, 104, 26), B('dash', 40, 128, 25), B('sup', 201, 34, 23)];
+  if (swipeMode()) {
+    // swipe controls leave the screen clear: just the three meter buttons, bottom-left
+    const X0 = Math.max(view.sl * 0.45, 4) + 12;
+    ctl.btns = [B('sp1', X0 + 30 * k, Y - 30 * k, 25 * k), B('sp2', X0 + 92 * k, Y - 30 * k, 25 * k), B('sp3', X0 + 160 * k, Y - 33 * k, 29 * k)];
+  } else {
+    const R = (name, dx, dy, r) => B(name, X - dx * k, Y - dy * k, r * k);
+    ctl.btns = [R('atk', 50, 50, 33), R('kick', 132, 36, 26), R('guard', 112, 104, 26), R('dash', 40, 128, 25),
+      R('sp1', 189, 30, 20), R('sp2', 235, 30, 20), R('sp3', 285, 33, 23)];
+  }
   const s = ctl.stick;
   s.r = 44 * k;
   s.hx = Math.max(view.sl * 0.45, 4) + 10 + 76 * k; s.hy = Y - 70 * k;
@@ -386,24 +408,31 @@ function setStick(s, x, y) {
   }
   s.x = s.bx + dx; s.y = s.by + dy;
 }
+function clearEdges() { const e = ctl.edge; e.atk = e.kick = e.dash = e.sp1 = e.sp2 = e.sp3 = false; ctl.swq.length = 0; }
 function releaseAll() {
   for (const P of ptrs.values()) releaseBtn(P);
   ptrs.clear();
   for (const b of ctl.btns) b.held = 0;
   const s = ctl.stick; s.id = null; s.bx = s.x = s.hx; s.by = s.y = s.hy;
   ui.down = false; ui.drag = null;
+  ctl.swq.length = 0; ctl.marks.length = 0;
   for (const k in keys) keys[k] = false;
 }
+function mark(m) { if (ctl.marks.length > 10) ctl.marks.shift(); ctl.marks.push(m); }
 
 function onDown(e) {
   AudioSys.unlock();
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   if (e.pointerType !== 'mouse') ctl.touchSeen = true;
   const p = toLogical(e.clientX, e.clientY);
-  const P = { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, t: performance.now(), role: 'ui', moved: 0, btn: null };
+  const P = { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, t: performance.now(), role: 'ui', moved: 0, btn: null, ax: p.x, ay: p.y, phase: 0, dir: 0 };
   ptrs.set(e.pointerId, P);
-  const usePad = ctl.on && ctl.touchSeen && !(view.portrait && !view.rot) && !inZone(p.x, p.y);
-  if (usePad) {
+  const live = ctl.on && !(view.portrait && !view.rot) && !inZone(p.x, p.y);
+  if (live && swipeMode()) {
+    // every touch is a gesture: tap, swipe or hold. Any number of fingers, anywhere on the screen.
+    const b = hitBtn(p.x, p.y);
+    if (b) { P.role = 'btn'; pressBtn(P, b); } else P.role = 'gest';
+  } else if (live && ctl.touchSeen) {
     const b = hitBtn(p.x, p.y);
     if (b) { P.role = 'btn'; pressBtn(P, b); }
     else if (p.x < view.W * 0.46 && p.y > 62) {
@@ -426,10 +455,19 @@ function onMove(e) {
   if (!P) { if (e.pointerType === 'mouse') { ui.px = p.x; ui.py = p.y; } return; }
   P.moved = Math.max(P.moved, Math.hypot(p.x - P.sx, p.y - P.sy));
   P.x = p.x; P.y = p.y;
-  if (P.role === 'stick') setStick(ctl.stick, p.x, p.y);
+  if (P.role === 'gest') {
+    const dx = p.x - P.ax, dy = p.y - P.ay, d = Math.hypot(dx, dy);
+    const dir = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 1 : 2) : (dy < 0 ? 3 : 4);
+    if (P.phase === 2 && dir === P.dir) { P.ax = p.x; P.ay = p.y; }             // still the same swipe: carry the anchor along
+    else if (d >= (P.phase === 2 ? SW_TURN : SW_MIN)) {
+      if (ctl.swq.length < 3) ctl.swq.push(dir);
+      mark({ k: 1, x: P.ax, y: P.ay, dir, life: 18 });
+      P.phase = 2; P.dir = dir; P.ax = p.x; P.ay = p.y;
+    }
+  } else if (P.role === 'stick') setStick(ctl.stick, p.x, p.y);
   else if (P.role === 'btn') {
     const b = hitBtn(p.x, p.y);
-    if (b !== P.btn) { releaseBtn(P); if (b) pressBtn(P, b); }
+    if (b !== P.btn) { releaseBtn(P); if (b && !swipeMode()) pressBtn(P, b); }
   } else if (P.role === 'ui') {
     ui.px = p.x; ui.py = p.y;
     if (ui.drag && ui.drag.id === e.pointerId) { ui.drag.dx = p.x - ui.drag.x; ui.drag.dy = p.y - ui.drag.y; ui.drag.x = p.x; ui.drag.y = p.y; }
@@ -440,7 +478,10 @@ function onUp(e) {
   const P = ptrs.get(e.pointerId);
   if (!P) return;
   ptrs.delete(e.pointerId);
-  if (P.role === 'stick') { const s = ctl.stick; s.id = null; s.bx = s.x = s.hx; s.by = s.y = s.hy; }
+  if (P.role === 'gest') {
+    // a short touch that never travelled is a tap, even if the guard had just come up
+    if (e.type !== 'pointercancel' && ctl.on && P.phase !== 2 && performance.now() - P.t < TAP_MS && P.moved < SW_MIN) { ctl.edge.atk = true; mark({ k: 0, x: P.x, y: P.y, dir: 0, life: 10 }); }
+  } else if (P.role === 'stick') { const s = ctl.stick; s.id = null; s.bx = s.x = s.hx; s.by = s.y = s.hy; }
   else if (P.role === 'btn') releaseBtn(P);
   else if (P.role === 'ui') {
     if (e.type !== 'pointercancel' && P.moved < 14 && performance.now() - P.t < 900) ui.clicks.push({ x: P.x, y: P.y, sx: P.sx, sy: P.sy });
@@ -485,38 +526,49 @@ function pollGamepad() {
   if (!gp) return;
   const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed), ax = gp.axes || [];
   padState.l = b(14) || ax[0] < -0.4; padState.r = b(15) || ax[0] > 0.4; padState.u = b(12) || ax[1] < -0.6; padState.d = b(13) || ax[1] > 0.55;
-  padState.atk = b(0); padState.guard = b(1) || b(4) || b(6);
-  const now = [b(0), b(2), b(5) || b(7), b(3), b(9)], pv = padState.prev;
-  if (now[0] && !pv[0]) ctl.edge.atk = true;
-  if (now[1] && !pv[1]) ctl.edge.kick = true;
-  if (now[2] && !pv[2]) ctl.edge.dash = true;
-  if (now[3] && !pv[3]) ctl.edge.sup = true;
-  if (now[4] && !pv[4]) keyHits.push('KeyP');
+  padState.atk = b(0); padState.guard = b(1) || b(6);
+  // A attack, X kick, RB dash, Y special 1, LB special 2, RT super, Start pause
+  const now = [b(0), b(2), b(5), b(3), b(4), b(7), b(9)], pv = padState.prev, names = ['atk', 'kick', 'dash', 'sp1', 'sp2', 'sp3'];
+  for (let i = 0; i < 6; i++) if (now[i] && !pv[i]) ctl.edge[names[i]] = true;
+  if (now[6] && !pv[6]) keyHits.push('KeyP');
   const nav = [padState.l, padState.r, padState.u, padState.d, b(1)];
   if (!ctl.on) {                                            // in menus the pad acts like arrow keys, A confirms, B goes back
     if (now[0] && !pv[0]) keyHits.push('Enter');
     const codes = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Escape'];
-    for (let i = 0; i < 5; i++) if (nav[i] && !pv[5 + i]) keyHits.push(codes[i]);
+    for (let i = 0; i < 5; i++) if (nav[i] && !pv[7 + i]) keyHits.push(codes[i]);
   }
   padState.prev = now.concat(nav);
 }
-const blankInput = () => ({ l: false, r: false, u: false, d: false, atk: false, guard: false, atkP: false, kickP: false, dashP: false, supP: false });
-// Player pad → fighter input. Call once per simulation step; press edges are consumed here.
+// sw: a swipe this step. 1 right, 2 left, 3 up, 4 down, 5 toward the opponent (the Dash button with no direction held)
+const blankInput = () => ({ l: false, r: false, u: false, d: false, run: false, atk: false, guard: false, atkP: false, kickP: false, sw: 0, sp1P: false, sp2P: false, sp3P: false });
+// Player controls → fighter input. Call once per simulation step; press edges are consumed here.
 function readPad(out) {
-  const s = ctl.stick, k = keys;
+  const s = ctl.stick, k = keys, now = performance.now();
   let sx = 0, sy = 0;
   if (s.id !== null) { sx = (s.x - s.bx) / s.r; sy = (s.y - s.by) / s.r; }
   out.l = sx < -0.36 || !!k.ArrowLeft || !!k.KeyA || padState.l;
   out.r = sx > 0.36 || !!k.ArrowRight || !!k.KeyD || padState.r;
   out.u = sy < -0.56 || !!k.ArrowUp || !!k.KeyW || padState.u;
   out.d = sy > 0.5 || !!k.ArrowDown || !!k.KeyS || padState.d;
-  if (out.l && out.r) out.l = out.r = false;
+  out.run = false;
   const held = n => { const b = btnOf(n); return !!b && b.held > 0; };
+  let guard = held('guard') || !!k.KeyL || !!k.KeyC || padState.guard;
+  for (const P of ptrs.values()) {
+    if (P.role !== 'gest') continue;
+    if (P.phase === 0 && now - P.t >= HOLD_MS) { P.phase = 1; mark({ k: 2, x: P.x, y: P.y, dir: 0, life: 12 }); }      // held still: guard
+    if (P.phase === 1) guard = true;
+    else if (P.phase === 2) {                                // finger left down after a swipe: keep going that way
+      if (P.dir === 1) { out.r = true; out.run = true; } else if (P.dir === 2) { out.l = true; out.run = true; } else if (P.dir === 4) out.d = true;
+    }
+  }
+  if (out.l && out.r) out.l = out.r = false;
   out.atk = held('atk') || !!k.KeyJ || !!k.KeyZ || padState.atk;
-  out.guard = held('guard') || !!k.KeyL || !!k.KeyC || padState.guard;
+  out.guard = guard;
   const ed = ctl.edge;
-  out.atkP = ed.atk; out.kickP = ed.kick; out.dashP = ed.dash; out.supP = ed.sup;
-  ed.atk = ed.kick = ed.dash = ed.sup = false;
+  out.atkP = ed.atk; out.kickP = ed.kick; out.sp1P = ed.sp1; out.sp2P = ed.sp2; out.sp3P = ed.sp3;
+  // the Dash button is a swipe in whichever direction is held
+  out.sw = ctl.swq.length ? ctl.swq.shift() : ed.dash ? (out.u ? 3 : out.d ? 4 : out.l ? 2 : out.r ? 1 : 5) : 0;
+  ed.atk = ed.kick = ed.dash = ed.sp1 = ed.sp2 = ed.sp3 = false;
   return out;
 }
 
@@ -638,19 +690,22 @@ function txt(str, x, y, px, o) {
   if (o.alpha !== undefined) { g.save(); g.globalAlpha *= o.alpha; g.fillText(str, x, y); g.restore(); }
   else g.fillText(str, x, y);
 }
-function txtWrap(str, x, y, px, maxW, lh, o) {
-  o = o || {};
-  setFont(px, o.w);
-  const words = String(str).split(' ');
-  let ln = '', n = 0;
-  const out = [];
+function txtLines(str, px, maxW, w) {
+  setFont(px, w);
+  const words = String(str).split(' '), out = [];
+  let ln = '';
   for (const wd of words) {
     const t = ln ? ln + ' ' + wd : wd;
     if (ln && g.measureText(t).width > maxW) { out.push(ln); ln = wd; } else ln = t;
   }
   if (ln) out.push(ln);
-  for (const l of out) { txt(l, x, y + n * lh, px, o); n++; }
-  return n;
+  return out;
+}
+function txtWrap(str, x, y, px, maxW, lh, o) {
+  o = o || {};
+  const out = txtLines(str, px, maxW, o.w);
+  for (let n = 0; n < out.length; n++) txt(out[n], x, y + n * lh, px, o);
+  return out.length;
 }
 
 // ───────────────────────── immediate-mode UI ─────────────────────────
@@ -739,21 +794,45 @@ const ERAS = [
 const M = (anim, su, ac, rc, dmg, r1, x) =>
   Object.assign({ anim, su, ac, rc, dmg, r0: 0, r1, y0: 24, y1: 80, stun: 15, kbx: 110, kby: 0, lunge: 0, gb: 1, heavy: false }, x || {});
 
-const KICK = M('kick', 6, 4, 14, 6, 47, { y0: 28, y1: 66, kbx: 270, stun: 15, gb: 1.6, blunt: true, abs: true });
-const SWEEP = M('sweep', 8, 4, 20, 7, 50, { y0: 0, y1: 24, kbx: 70, kby: -210, launch: true, blunt: true, abs: true, low: true });
-const AIRKICK = M('airkick', 4, 16, 6, 8, 42, { y0: -26, y1: 52, kbx: 190, stun: 18, blunt: true, abs: true });
+// kicks every fighter has, whatever they carry
+const KICK = M('kick', 6, 4, 14, 6, 47, { y0: 28, y1: 66, kbx: 440, stun: 21, gb: 1.6, blunt: true, abs: true, kick: true });       // a shove: little damage, a lot of room
+const SWEEP = M('sweep', 8, 4, 20, 7, 50, { y0: 0, y1: 24, kbx: 70, kby: -210, launch: true, blunt: true, abs: true, low: true, kick: true, ender: true });
+const AIRKICK = M('airkick', 4, 16, 6, 8, 42, { y0: -26, y1: 52, kbx: 190, stun: 18, blunt: true, abs: true, kick: true });
+const SLIDE = M('slide', 5, 12, 15, 7, 48, { y0: 0, y1: 24, kbx: 60, kby: -230, launch: true, blunt: true, abs: true, low: true, kick: true, lunge: 340, lungeAt: 2, slide: true });
+// what a ranged weapon uses for the rush strike, the launcher, the knock-away and the leap
+const RUSHKICK = M('knee', 3, 5, 21, 7, 44, { y0: 22, y1: 72, stun: 22, kbx: 50, blunt: true, abs: true, kick: true, link: true, lunge: 200 });
+const UPKICK = M('flipkick', 6, 6, 22, 8, 46, { y0: 18, y1: 106, kbx: 40, kby: -440, launch: true, heavy: true, blunt: true, abs: true, kick: true, link: true, ender: true, rot: -1, rotAt: 5, rotDur: 17 });
+const BOOT = M('boot', 9, 4, 21, 10, 52, { y0: 26, y1: 72, kbx: 520, kby: -280, launch: true, heavy: true, gb: 2.2, blunt: true, abs: true, kick: true, ender: true });
+const LEAPKICK = M('divekick', 16, 22, 6, 9, 44, { y0: -36, y1: 52, stun: 22, kbx: 90, blunt: true, abs: true, kick: true, leap: true, spike: true, rot: 1, rotAt: 1, rotDur: 13 });
 
 const PROJ = {
-  rock:     { kind: 'rock', spd: 500, up: 0.30, g: 620, dmg: 8, stun: 14, kbx: 120, gb: 0.8 },
-  arrow:    { kind: 'arrow', spd: 780, up: 0.045, g: 200, dmg: 11, stun: 15, kbx: 130, gb: 0.8 },
-  bolt:     { kind: 'bolt', spd: 1050, up: 0.012, g: 60, dmg: 14, stun: 17, kbx: 180 },
-  ball:     { kind: 'ball', spd: 1150, up: 0, g: 30, dmg: 18, stun: 18, kbx: 200, heavy: true },
-  bullet:   { kind: 'bullet', spd: 1500, up: 0, g: 0, dmg: 7.5, stun: 10, kbx: 70, gb: 0.6 },
-  pellet:   { kind: 'pellet', spd: 1250, up: 0, g: 0, dmg: 5.4, n: 5, spread: 0.1, life: 19, falloff: true, stun: 12, kbx: 170, breaker: true, gb: 0.7 },
-  smg:      { kind: 'bullet', spd: 1500, up: 0, g: 0, dmg: 3.5, stun: 4, kbx: 30, spread: 0.06, gb: 0.5 },
+  rock:     { kind: 'rock', spd: 500, up: 0.30, g: 620, dmg: 9.5, stun: 14, kbx: 120, gb: 0.8 },
+  arrow:    { kind: 'arrow', spd: 780, up: 0.045, g: 200, dmg: 13, stun: 18, kbx: 150, gb: 0.8 },
+  bolt:     { kind: 'bolt', spd: 1050, up: 0.012, g: 60, dmg: 16, stun: 20, kbx: 200 },
+  ball:     { kind: 'ball', spd: 1150, up: 0, g: 30, dmg: 21, stun: 18, kbx: 200, heavy: true },
+  bullet:   { kind: 'bullet', spd: 1500, up: 0, g: 0, dmg: 8.5, stun: 13, kbx: 90, gb: 0.6 },
+  pellet:   { kind: 'pellet', spd: 1250, up: 0, g: 0, dmg: 4.6, n: 5, spread: 0.1, life: 19, falloff: true, stun: 12, kbx: 170, breaker: true, gb: 0.7 },
+  smg:      { kind: 'bullet', spd: 1500, up: 0, g: 0, dmg: 4, stun: 4, kbx: 30, spread: 0.06, gb: 0.5 },      // stagger shorter than the gap between rounds, so a spray stings but does not pin
   sniper:   { kind: 'tracer', spd: 2800, up: 0, g: 0, dmg: 27, stun: 24, kbx: 300, heavy: true, launch: true },
   dynamite: { kind: 'dynamite', spd: 380, up: 0.34, g: 900, fuse: 70, shortFuse: 16, bounce: 0.35, expl: { r: 80, dmg: 30 } },
-  rocket:   { kind: 'rocket', spd: 420, up: 0, g: 0, accel: 900, expl: { r: 82, dmg: 36 } }
+  rocket:   { kind: 'rocket', spd: 420, up: 0, g: 0, accel: 900, expl: { r: 82, dmg: 36 } },
+  // thrown or fired by specials
+  wave:     { kind: 'wave', spd: 600, up: 0, g: 0, dmg: 22, stun: 22, kbx: 240, heavy: true, life: 34, rad: 18 },
+  bone:     { kind: 'bone', spd: 620, up: 0.08, g: 260, dmg: 28, stun: 22, kbx: 260, heavy: true, launch: true, blunt: true, rad: 9 },
+  javelin:  { kind: 'javelin', spd: 980, up: 0.03, g: 120, dmg: 34, stun: 24, kbx: 320, heavy: true, launch: true, rad: 5 },
+  quake:    { kind: 'quake', spd: 520, up: 0, g: 0, dmg: 18, stun: 20, kbx: 60, kby: -400, heavy: true, launch: true, blunt: true, life: 30, rad: 15, ground: true },
+  boulder:  { kind: 'boulder', spd: 540, up: 0.26, g: 560, dmg: 34, stun: 24, kbx: 300, heavy: true, launch: true, blunt: true, rad: 9, gb: 2.4 },
+  quickdyn: { kind: 'dynamite', spd: 640, up: 0.14, g: 520, fuse: 30, expl: { r: 70, dmg: 27 } },
+  bundle:   { kind: 'bundle', spd: 400, up: 0.36, g: 900, fuse: 64, shortFuse: 14, bounce: 0.3, expl: { r: 118, dmg: 46 } },
+  rainArrow: { kind: 'arrow', spd: 800, up: 0, g: 200, dmg: 7, stun: 13, kbx: 40, gb: 0.8 },
+  grape:    { kind: 'pellet', spd: 1200, up: 0, g: 0, dmg: 4.0, n: 6, spread: 0.13, life: 16, falloff: true, stun: 14, kbx: 200, breaker: true, gb: 0.8 },
+  deadeye:  { kind: 'tracer', spd: 2600, up: 0, g: 0, dmg: 36, stun: 26, kbx: 320, heavy: true, launch: true, gb: 3 },
+  firebolt: { kind: 'firebolt', spd: 1000, up: 0.012, g: 60, expl: { r: 72, dmg: 40 } },
+  slug:     { kind: 'slug', spd: 1500, up: 0, g: 0, dmg: 21, stun: 22, kbx: 340, heavy: true, gb: 2 },
+  frag:     { kind: 'frag', spd: 560, up: 0.34, g: 800, fuse: 52, shortFuse: 12, bounce: 0.35, expl: { r: 84, dmg: 40 } },
+  pierce:   { kind: 'tracer', spd: 2800, up: 0, g: 0, dmg: 36, stun: 26, kbx: 320, heavy: true, launch: true, unblock: true },
+  mini:     { kind: 'rocket', spd: 520, up: 0, g: 0, accel: 1100, expl: { r: 62, dmg: 27 } },
+  mortar:   { kind: 'rocket', spd: 0, up: 0, g: 1000, expl: { r: 72, dmg: 22 } }
 };
 
 // bars: [damage, speed, reach] out of 10.  ib: icon bounds along the weapon axis.
@@ -782,7 +861,7 @@ const WEAPONS = {
     blurb: 'Arrows drop over distance. Aim is automatic, timing is not.',
     fire: { anim: 'bow', su: 20, refire: 999, rc: 15, mag: 0, proj: 'arrow', snd: 'twang' } },
   axe: { name: 'War Axe', era: 1, tier: 6, cls: 'heavy', len: 48, hands: 2, grip2: -15, sharp: true, ib: [-16, 53], kind: 'Melee', bars: [8, 3, 5],
-    blurb: 'Slow and brutal. Light hits will not interrupt the swing, and it wrecks a guard.',
+    blurb: 'Slow and brutal. One light hit will not interrupt the swing, and it wrecks a guard.',
     chain: [M('chop', 15, 5, 21, 15, 64, { stun: 26, kbx: 120, heavy: true, gb: 2, armor: true }),
       M('upswing', 16, 5, 26, 19, 64, { launch: true, kbx: 150, kby: -420, heavy: true, gb: 2, armor: true })] },
 
@@ -790,9 +869,9 @@ const WEAPONS = {
     blurb: 'A flat, fast bolt. One shot, then you crank it back.',
     fire: { anim: 'long', su: 8, refire: 999, rc: 14, mag: 1, reload: 54, proj: 'bolt', snd: 'thunk' } },
   hammer: { name: 'Warhammer', era: 2, tier: 8, cls: 'heavy', len: 48, hands: 2, grip2: -14, ib: [-15, 50], kind: 'Melee', bars: [10, 1, 5],
-    blurb: 'The hardest single hit in the game. Shrugs off light attacks mid-swing.',
-    chain: [M('chop', 18, 5, 26, 28, 62, { launch: true, kbx: 210, kby: -260, heavy: true, gb: 3, armor: true, blunt: true, quake: true }),
-      M('upswing', 16, 5, 26, 24, 62, { launch: true, kbx: 170, kby: -470, heavy: true, gb: 2.4, armor: true, blunt: true })] },
+    blurb: 'The hardest single hit in the game. Shrugs off a light attack mid-swing.',
+    chain: [M('chop', 18, 5, 26, 28, 62, { launch: true, kbx: 210, kby: -260, heavy: true, gb: 2, armor: true, blunt: true, quake: true }),
+      M('upswing', 16, 5, 26, 24, 62, { launch: true, kbx: 170, kby: -470, heavy: true, gb: 2, armor: true, blunt: true })] },
   katana: { name: 'Katana', era: 2, tier: 9, cls: 'blade', len: 55, sharp: true, ib: [-10, 56], kind: 'Melee', bars: [6, 9, 6],
     blurb: 'Fast, long, and the string ends in a dashing cut.',
     chain: [M('slashD', 5, 4, 9, 11, 68, { stun: 16, kbx: 70 }), M('slashU', 6, 4, 10, 11, 68, { stun: 20, kbx: 80 }),
@@ -807,7 +886,7 @@ const WEAPONS = {
       M('smash', 9, 4, 20, 19, 66, { launch: true, kbx: 200, kby: -260, heavy: true, gb: 1.5 })] },
 
   revolver: { name: 'Revolver', era: 4, tier: 13, cls: 'pistol', len: 22, muz: 22, ib: [-5, 23], kind: 'Ranged', bars: [5, 7, 9], band: [160, 620],
-    blurb: 'Six shots as fast as you can tap. Bullets fly at chest height, so a crouch slips under them.',
+    blurb: 'Six shots as fast as you can tap. Bullets fly at chest height, so a slide goes under them.',
     fire: { anim: 'pistol', su: 7, refire: 13, rc: 17, mag: 6, reload: 78, proj: 'bullet', snd: 'pistol', recoil: 25, shake: 2 } },
   dynamite: { name: 'Dynamite', era: 4, tier: 14, cls: 'throw', len: 12, ib: [-3, 18], kind: 'Explosive', bars: [9, 2, 5], band: [110, 300],
     blurb: 'Bounces once, then blows. The blast hurts you too, so do not stand on it.',
@@ -820,7 +899,7 @@ const WEAPONS = {
     blurb: 'Grinds for six hits and chews through a guard. Once it is running, bullets will not stop it.',
     chain: [M('grind', 8, 36, 18, 5.2, 64, { multi: 6, stun: 12, kbx: 30, gb: 2.2, lunge: 110, lungeAt: 6, armor: 'proj', armorFrom: 8, saw: true, heavy: true, flat: true, y0: 20, y1: 76 })] },
   smg: { name: 'SMG', era: 5, tier: 17, cls: 'long', len: 26, muz: 26, hands: 2, grip2: 13, ib: [-13, 27], kind: 'Ranged', bars: [4, 10, 8], band: [140, 520],
-    blurb: 'Hold to spray. Twenty-eight rounds go quickly.',
+    blurb: 'Every tap is a four-round burst. Twenty-eight rounds go quickly.',
     fire: { anim: 'long', su: 6, refire: 5, rc: 12, auto: true, mag: 28, reload: 72, proj: 'smg', snd: 'auto', shell: true, recoil: 8, shake: 1.2 } },
   sniper: { name: 'Sniper Rifle', era: 5, tier: 17, cls: 'long', len: 53, muz: 53, hands: 2, grip2: 18, ib: [-18, 54], kind: 'Ranged', bars: [10, 1, 10], band: [260, 820],
     blurb: 'A laser gives the shot away before it fires. If it lands, they go down.',
@@ -833,20 +912,100 @@ const WEAPON_ORDER = ['fists', 'club', 'spear', 'sling', 'sword', 'bow', 'axe', 
   'revolver', 'dynamite', 'shotgun', 'chainsaw', 'smg', 'sniper', 'rocket'];
 for (const id of WEAPON_ORDER) { const w = WEAPONS[id]; w.id = id; if (!w.hands) w.hands = 1; }
 
-// every weapon gets a super built from its class
-(function buildSupers() {
-  const rushAnim = { fist: 'cross', blade: 'dashslash', pole: 'lunge', heavy: 'chop', saw: 'grind' };
+// Every weapon gets the same vocabulary, built from its class:
+// a rush strike, a launcher, a knock-away smash, a leaping strike, two specials and a super.
+(function buildMoves() {
+  const anims = { fist: ['cross', 'upper', 'hook'], blade: ['dashslash', 'slashU', 'smash'], pole: ['lunge', 'upswing', 'slashD'], heavy: ['bash', 'upswing', 'chop'], saw: ['grind', 'upswing', 'chop'] };
+  const supAnim = { fist: 'cross', blade: 'dashslash', pole: 'lunge', heavy: 'chop', saw: 'grind' };
+  const supName = { fist: 'Hundred Hands', club: 'Rampage', blade: 'Blade Storm', pole: 'Impaler', heavy: 'Earthbreaker', saw: 'Overkill', sling: 'Rockslide', bow: 'Arrow Storm', crossbow: 'Bolt Storm',
+    flintlock: 'Broadside', revolver: 'High Noon', dynamite: 'Demolition', shotgun: 'Buckstorm', smg: 'Mag Dump', sniper: 'Double Tap', rocket: 'Twin Rockets' };
   const burst = { sling: [5, 6], bow: [5, 6], crossbow: [4, 7], flintlock: [3, 9], revolver: [6, 5], dynamite: [3, 11], shotgun: [3, 10], smg: [14, 3], sniper: [2, 15], rocket: [2, 17] };
+  // ai: the distance band where the move makes sense
+  const SP = (name, desc, ai, m) => Object.assign(m, { special: true, name, desc, ai });
+  const F = (w, o) => Object.assign({}, w.fire, { k: 'fire', free: true, laser: false, auto: false, refire: 999 }, o);
   for (const id of WEAPON_ORDER) {
-    const w = WEAPONS[id];
-    if (w.chain) {
-      const r1 = Math.max(64, w.chain[0].r1 + 14), total = 30 + w.era * 2;
-      w.sup = M(rushAnim[w.cls], 8, 18, 22, total / 6, r1, { multi: 3, lunge: 560, lungeAt: 3, stun: 16, kbx: 30, gb: 2.6, heavy: true, sup: true, flat: true,
-        blunt: !w.sharp, saw: !!w.chain[0].saw, fin: { kbx: 330, kby: -430 } });
-    } else {
-      const b = burst[id];
-      w.sup = Object.assign({}, w.fire, { su: 8, burst: b[0], refire: b[1], rc: 20, free: true, sup: true, dmgMul: 1.25, laser: false });
+    const w = WEAPONS[id], blunt = !w.sharp;
+    let d = 0, r = 0;
+    if (!w.chain) { w.rush = RUSHKICK; w.launch = UPKICK; w.smash = BOOT; w.leap = LEAPKICK; }
+    else {
+      const ch = w.chain, a = anims[w.cls], hv = w.cls === 'heavy' || w.cls === 'saw';
+      d = w.cls === 'saw' ? 12 : Math.min(20, ch.reduce((t, m) => t + m.dmg, 0) / ch.length); r = ch[0].r1;      // the weapon's typical hit, which its other moves are scaled from
+      w.rush = M(a[0], hv ? 5 : 3, 4, hv ? 24 : 21, d * (hv ? 0.6 : 0.8), r + 4, { stun: 22, kbx: 50, blunt, link: true, lunge: 210, y0: 26, y1: 76, saw: w.cls === 'saw' });
+      w.launch = M(a[1], hv ? 11 : 6, 4, hv ? 26 : 22, d * (hv ? 0.55 : 0.75), r, { launch: true, kbx: 40, kby: -440, heavy: true, y1: 106, blunt, link: true, ender: true, gb: 1.4 });
+      w.smash = M(a[2], hv ? 14 : 10, 4, hv ? 26 : 22, d * (hv ? 1.0 : 1.3), r + 3, { launch: true, kbx: 520, kby: -280, heavy: true, gb: 2.2, blunt, ender: true, armor: hv });
+      w.leap = w.cls === 'fist' ? LEAPKICK
+        : M('leapslash', 16, 22, 6, d * (hv ? 0.7 : 0.95), Math.max(42, r - 10), { y0: -36, y1: 66, stun: 22, kbx: 90, blunt, abs: true, leap: true, spike: true, rot: 1, rotAt: 1, rotDur: 13, heavy: hv });
     }
+    switch (w.cls) {
+      case 'fist': w.sp = [
+        SP('Flurry', 'Eight fast punches that carry you forward.', [0, 110], M('cross', 5, 24, 16, 2.75, 46, { k: 'melee', multi: 3, lunge: 170, lungeAt: 3, stun: 14, kbx: 20, blunt: true, flat: true, y0: 30, fin: { kbx: 300, kby: -320 } })),
+        SP('Ground Pound', 'Leap up and slam the floor. Launches anyone close.', [40, 210], M('pound', 8, 34, 20, 0, 0, { k: 'melee', noBox: true, kick: true, hop: 440, hopAt: 7, hopAim: true, pound: { r: 92, dmg: 36, kby: -470 }, rot: 1, rotAt: 8, rotDur: 18, armor: true, landLag: 18 }))];
+        break;
+      case 'blade': w.sp = [
+        SP(id === 'club' ? 'Wild Swing' : 'Whirl', 'A spinning advance that hits four times.', [0, 150], M('whirl', 6, 24, 16, (14 + d * 0.6) / 4, r + 4, { k: 'melee', multi: 6, lunge: 250, lungeAt: 4, spin: 2, stun: 15, kbx: 25, blunt, flat: true, y0: 12, y1: 98, fin: { kbx: 240, kby: -330 } })),
+        id === 'club'
+          ? SP('Bone Toss', 'Throw the club end over end.', [110, 420], M('hurl', 11, 2, 26, 0, 0, { k: 'melee', noBox: true, spawn: { proj: 'bone', at: 11, y: 62, snd: 'throw_' }, hideFrom: 11 }))
+          : SP('Crescent', 'A slash that sends a blade of air across the arena.', [90, 400], M('slashD', 9, 4, 22, d * 0.7, r, { k: 'melee', heavy: true, kbx: 200, stun: 20, spawn: { proj: 'wave', at: 10, y: 46, dmgMul: 0.85 + d / 40 } }))];
+        break;
+      case 'pole': w.sp = [
+        SP('Vault', 'Plant the spear and swing through feet first.', [60, 200], M('vault', 7, 22, 12, 22, 50, { k: 'melee', kick: true, abs: true, y0: -30, y1: 62, hop: 300, hopAt: 6, hopVx: 360, kbx: 380, kby: -260, launch: true, heavy: true, blunt: true, landLag: 10 })),
+        SP('Javelin', 'Throw the spear flat and hard.', [120, 520], M('hurl', 12, 2, 28, 0, 0, { k: 'melee', noBox: true, spawn: { proj: 'javelin', at: 12, y: 66, snd: 'throw_' }, hideFrom: 12 }))];
+        break;
+      case 'heavy': w.sp = [
+        SP('Quake', 'Slam the ground and send a shockwave along it. Jump it.', [50, 280], M('chop', 13, 5, 26, d * 0.35, r, { k: 'melee', heavy: true, gb: 2, blunt: true, armor: true, launch: true, kbx: 100, kby: -330, quake: true, spawn: { proj: 'quake', at: 14, x: 46, ground: true, snd: 'quake' } })),
+        SP('Cyclone', 'Spin through them. Light hits will not stop it.', [0, 140], M('whirl', 10, 30, 22, (20 + Math.min(d, 20) * 0.8) / 5, r + 2, { k: 'melee', multi: 6, lunge: 150, lungeAt: 8, spin: 2.5, armor: true, flat: true, heavy: true, blunt, stun: 16, kbx: 20, y0: 10, y1: 100, fin: { kbx: 260, kby: -480 } }))];
+        break;
+      case 'saw': w.sp = [
+        SP('Rev Charge', 'A long grinding charge that shrugs off hits.', [40, 260], M('grind', 6, 24, 18, 3.7, r, { k: 'melee', multi: 4, lunge: 430, lungeAt: 4, saw: true, armor: true, flat: true, heavy: true, stun: 12, kbx: 20, gb: 2, y0: 20, y1: 76, fin: { kbx: 300, kby: -300 } })),
+        SP('Rip', 'Carve upward and throw them into the air.', [0, 90], M('rip', 8, 20, 22, 7, r, { k: 'melee', multi: 4, lunge: 70, lungeAt: 6, saw: true, armor: 'proj', flat: true, heavy: true, stun: 14, kbx: 15, y0: 10, y1: 112, fin: { kbx: 60, kby: -540 } }))];
+        break;
+      case 'throw': w.sp = id === 'sling' ? [
+        SP('Scatter', 'Three rocks at once, all on target.', [60, 400], F(w, { su: 12, rc: 16, aimAt: [-9, 0, 9], aimT: 0.6, salvo: true, dmgMul: 0.85 })),
+        SP('Boulder', 'One very large rock. Knocks them flat.', [120, 420], F(w, { su: 17, rc: 20, proj: 'boulder' }))]
+        : [
+          SP('Short Fuse', 'A fast, flat throw that blows on impact.', [130, 330], F(w, { su: 10, rc: 18, proj: 'quickdyn' })),
+          SP('Bundle', 'Three sticks tied together. Stand well back.', [150, 330], F(w, { su: 16, rc: 22, proj: 'bundle' }))];
+        break;
+      case 'bow': w.sp = [
+        SP('Volley', 'Three arrows on one string.', [70, 560], F(w, { su: 16, rc: 16, multiA: [0, 0.11, 0.22], dmgMul: 0.8 })),
+        SP('Arrow Rain', 'Loose a flight into the sky. It lands where they stand.', [150, 800], F(w, { anim: 'bowUp', su: 14, rc: 22, proj: 'rainArrow', rain: 6 }))];
+        break;
+      case 'pistol': w.sp = [
+        id === 'revolver' ? SP('Fan Fire', 'Five shots from the hip, as fast as the hammer falls.', [36, 520], F(w, { su: 6, rc: 18, burst: 5, refire: 4, dmgMul: 0.62 }))
+          : SP('Grapeshot', 'A fistful of shot. Brutal up close.', [30, 190], F(w, { su: 9, rc: 20, proj: 'grape', recoil: 110, shake: 7 })),
+        SP('Deadeye', 'Take aim, then one shot that knocks them down.', [160, 800], F(w, { su: 24, rc: 26, proj: 'deadeye', laser: true, snd: 'rifle', recoil: 120, shake: 7 }))];
+        break;
+      case 'long': w.sp = id === 'crossbow' ? [
+        SP('Triple Bolt', 'Three bolts: high, level and low.', [36, 560], F(w, { su: 8, rc: 16, multiA: [-0.075, 0, 0.075], dmgMul: 0.55 })),
+        SP('Fire Bolt', 'A bolt that explodes where it lands.', [170, 640], F(w, { su: 11, rc: 20, proj: 'firebolt' }))]
+        : id === 'shotgun' ? [
+          SP('Slug', 'A single heavy slug that reaches across the arena.', [36, 640], F(w, { su: 8, rc: 22, proj: 'slug', recoil: 120 })),
+          SP('Both Barrels', 'Two shells at once. The kick throws you clear.', [30, 170], F(w, { su: 9, rc: 26, multiA: [-0.04, 0.05], dmgMul: 0.62, recoil: 430, shake: 11 }))]
+          : id === 'smg' ? [
+            SP('Spray', 'Nine rounds swept from head to ankle. Ducking will not help.', [36, 420], F(w, { su: 6, rc: 14, burst: 9, refire: 3, sweep: [-0.12, 0.2], dmgMul: 0.75 })),
+            SP('Frag', 'Lob a grenade. It bounces once.', [210, 380], F(w, { anim: 'longUp', su: 12, rc: 22, proj: 'frag', snd: 'thunk', shell: false, recoil: 40 }))]
+            : [
+              SP('Snap Shot', 'No scope, no laser, no warning.', [36, 700], F(w, { su: 7, rc: 24, dmgMul: 0.8 })),
+              SP('Wallbanger', 'A round that goes straight through a guard.', [200, 860], F(w, { su: 28, rc: 34, proj: 'pierce', laser: true }))];
+        break;
+      case 'tube': w.sp = [
+        SP('Snap Rocket', 'A small, quick rocket. No wind-up.', [140, 600], F(w, { su: 8, rc: 20, proj: 'mini', backblast: false, recoil: 30 })),
+        SP('Barrage', 'Three rockets, up and over, down on their head.', [150, 760], F(w, { anim: 'tubeUp', su: 12, rc: 24, proj: 'mortar', burst: 3, refire: 7, aimAt: [-60, 0, 60] }))];
+        break;
+    }
+    if (w.chain) {
+      const r1 = Math.max(64, w.chain[0].r1 + 14), total = 44 + w.era * 2;
+      w.sup = M(supAnim[w.cls], 8, 18, 22, total / 6, r1, { k: 'melee', multi: 3, lunge: 560, lungeAt: 3, stun: 16, kbx: 30, gb: 2.6, heavy: true, sup: true, flat: true,
+        blunt: !w.sharp, saw: !!w.chain[0].saw, fin: { kbx: 330, kby: -430 }, ai: [0, 200], desc: 'Rush through them for six hits. Nothing stops it.' });
+    } else {
+      // a ranged super is worth a little more than a melee one on paper, because some of it will miss
+      const b = burst[id], P = PROJ[w.fire.proj], unit = P.expl ? P.expl.dmg : P.dmg * (P.n || 1);
+      w.sup = Object.assign({}, w.fire, { k: 'fire', su: 8, burst: b[0], refire: b[1], rc: 20, free: true, sup: true, dmgMul: (50 + w.era * 2) / (b[0] * unit), laser: false, auto: false, ai: [90, 800], desc: 'Empty everything you have, with no reload.' });
+      if (id === 'sling') Object.assign(w.sup, { aimAt: [-10, 0, 10, -5, 5], aimT: 0.62 });
+      if (id === 'dynamite') Object.assign(w.sup, { aimAt: [-56, 0, 56], aimT: 0.9, dmgMul: 1 });
+      if (P.expl) w.sup.ai = [180, 800]; else if (id === 'shotgun') w.sup.ai = [30, 220];
+    }
+    w.sup.name = supName[id] || supName[w.cls];
   }
 })();
 
@@ -855,11 +1014,11 @@ const FIGHTERS = [
   { id: 'ash', name: 'Ash', title: 'The drifter', col: '#000000', rim: '#ffffff', acc: '#e8202a', head: 'band', hp: 100, spd: 1.0, pow: 1.0, jmp: 1.0, tier: 0,
     perk: 'Even across the board. Builds super a quarter faster.', mods: { meter: 1.25 } },
   { id: 'volt', name: 'Volt', title: 'Live wire', col: '#ffd400', rim: '#000000', acc: '#000000', head: 'spikes', hp: 88, spd: 1.18, pow: 0.94, jmp: 1.05, tier: 0,
-    perk: 'Fastest on foot. Dash recharges in half the time.', mods: { dashCd: 0.5 } },
+    perk: 'Fastest on foot. Rush and flip recharge in half the time.', mods: { dashCd: 0.5 } },
   { id: 'brick', name: 'Brick', title: 'The wall', col: '#2a6df4', rim: '#000000', acc: '#ffffff', head: 'flat', hp: 124, spd: 0.86, pow: 1.12, jmp: 0.92, lw: 6.4, tier: 0,
     perk: 'Slow and heavy. Hard to knock back and his guard holds longer.', mods: { weight: 1.5, guard: 1.35 } },
   { id: 'nyx', name: 'Nyx', title: 'Night runner', col: '#9b4dff', rim: '#000000', acc: '#ffffff', head: 'pony', hp: 92, spd: 1.1, pow: 0.98, jmp: 1.18, tier: 0,
-    perk: 'Jumps highest and can jump again in the air.', mods: { airJumps: 1 } },
+    perk: 'Leaps highest, and can leap a second time in mid-air.', mods: { airJumps: 1 } },
   { id: 'krag', name: 'Krag', title: 'First of the fighters', col: '#3b1d0b', rim: '#fff3d6', acc: '#fff3d6', head: 'wild', hp: 122, spd: 0.92, pow: 1.16, jmp: 0.95, lw: 6, tier: 3,
     perk: 'Raw strength. Hand weapons hit 12% harder.', mods: { melee: 1.12 } },
   { id: 'talos', name: 'Talos', title: 'The bronze giant', col: '#e0a030', rim: '#000000', acc: '#e8202a', head: 'crest', hp: 116, spd: 0.94, pow: 1.06, jmp: 0.95, tier: 6,
@@ -895,12 +1054,12 @@ const TIERS = [
   { era: 3, weapon: 'flintlock', opp: MOOK('Privateer', '#ffffff', '#000000', '#e8202a', 'bandana') },
   { era: 3, weapon: 'cutlass', opp: MOOK('Corsair', '#0a2238', '#ffffff', '#f6d365', 'tricorn', { hat: '#c81e2b' }) },
   { era: 3, weapon: 'flintlock', alt: 'cutlass', boss: 'brine' },
-  { era: 4, weapon: 'revolver', opp: MOOK('Outlaw', '#2b0d18', '#ffffff', '#e8202a', 'stetson') },
+  { era: 4, weapon: 'revolver', opp: MOOK('Outlaw', '#2b0d18', '#ffffff', '#e8202a', 'stetson') , hpk: 1.12 },
   { era: 4, weapon: 'dynamite', opp: MOOK('Sapper', '#ffe9c2', '#000000', '#e8202a', 'cap') },
   { era: 4, weapon: 'shotgun', boss: 'marshal' },
   { era: 5, weapon: 'chainsaw', opp: MOOK('Ripper', '#ff5a1f', '#000000', '#000000', 'beanie') },
-  { era: 5, weapon: 'smg', opp: MOOK('Merc', '#cfd3df', '#000000', '#e8202a', 'beret') },
-  { era: 5, weapon: 'smg', alt: 'rocket', boss: 'recoil', hpk: 0.92 },
+  { era: 5, weapon: 'smg', opp: MOOK('Merc', '#cfd3df', '#000000', '#e8202a', 'beret'), hpk: 1.08 },
+  { era: 5, weapon: 'smg', alt: 'rocket', boss: 'recoil', hpk: 0.84 },
   { era: 6, weapon: 'club', phases: ['club', 'katana', 'revolver', 'smg', 'rocket'], boss: 'epoch', hpk: 1.12 }
 ];
 const LAST_TIER = TIERS.length;
@@ -947,7 +1106,7 @@ function difficulty(n) {
     block: lerp(0.04, 0.46, sk),
     dodge: lerp(0.0, 0.4, sk),
     combo: lerp(0.3, 0.8, sk),
-    punish: lerp(0.08, 0.6, sk),
+    punish: lerp(0.04, 0.62, Math.pow(sk, 1.5)),    // how reliably it hits back when you leave yourself open
     idle: lerp(0.5, 0.1, sk),                       // chance it hesitates
     hp: lerp(0.7, 1.12, t) * (1 + b * 0.08) * (1 + over * 0.05) * info.hpk,
     dmg: lerp(0.6, 0.95, t) * (1 + over * 0.035)
@@ -956,11 +1115,12 @@ function difficulty(n) {
 const threat = n => Math.min(10, 1 + Math.round(difficulty(n).t * 9));
 
 // ───────────────────────── rig: stick skeleton, poses, weapon art ─────────────────────────
-// A pose is 12 numbers:
+// A pose is 13 numbers:
 // 0 hip height · 1 torso lean · 2 head tilt · 3,4 near arm (shoulder, elbow) · 5,6 far arm
 // 7,8 near foot (x, lift) · 9,10 far foot (x, lift) · 11 weapon angle relative to the forearm
+// 12 whole-body rotation about the waist, for flips (positive tips the head forward)
 // Limb angles: 0 hangs straight down, PI/2 points forward, PI points up. Legs are solved by IK from foot targets.
-const NP = 12;
+const NP = 13;
 const SK = { torso: 30, neck: 2, head: 9, drop: 3, ua: 14.5, fa: 14.5, th: 19.5, sh: 19.5 };
 
 function mkPose(base, o) {
@@ -974,6 +1134,7 @@ function mkPose(base, o) {
   if (o.ff) { p[7] = o.ff[0]; p[8] = o.ff[1]; }
   if (o.fb) { p[9] = o.fb[0]; p[10] = o.fb[1]; }
   if (o.wp !== undefined) p[11] = o.wp;
+  if (o.rot !== undefined) p[12] = o.rot;
   return p;
 }
 function lerpPose(a, b, t, out) { for (let i = 0; i < NP; i++) out[i] = a[i] + (b[i] - a[i]) * t; return out; }
@@ -1009,6 +1170,8 @@ const POSE = {
   lying:    { h: 5, t: -1.47, hd: -0.08, af: [-1.9, 0.2], ab: [-2.3, 0.3], ff: [33, 3], fb: [30, 9], wp: 0.1 },
   land:     { h: 26, t: 0.32, ff: [14, 0], fb: [-12, 0] },
   relax:    { h: 35, t: 0.03, af: [0.18, 0.3], ab: [-0.16, 0.24], ff: [9, 0], fb: [-9, 0] },
+  flip:     { h: 46, t: 0.55, hd: 0.3, af: [0.7, 1.5], ab: [0.5, 1.6], ff: [9, 24], fb: [0, 21] },
+  slam:     { h: 13, t: 0.95, hd: -0.35, af: [1.05, 0.15], ab: [0.9, 0.3], ff: [17, 0], fb: [-12, 0] },
   win:      { h: 35, t: -0.06, hd: -0.2, af: [2.9, 0.25], ab: [2.55, 0.35], ff: [10, 0], fb: [-10, 0], wp: 0.15 }
 };
 // melee: wind-up, strike, follow-through
@@ -1029,12 +1192,29 @@ const ANIM = {
   chop:      { wind: { t: -0.3, h: 36, af: [3.3, 0.6], wp: 0.7 }, strike: { t: 0.55, h: 29, af: [1.2, 0.1], wp: -0.1, ff: [20, 0] }, follow: { t: 0.7, h: 27, af: [0.85, 0.05], wp: -0.2, ff: [20, 0] } },
   upswing:   { wind: { t: 0.5, h: 28, af: [-0.3, 0.2], wp: -0.6 }, strike: { t: -0.1, h: 35, af: [2.0, 0.2], wp: 0.3, ff: [17, 0] }, follow: { t: -0.25, h: 35, af: [2.9, 0.3], wp: 0.5, ff: [17, 0] } },
   grind:     { wind: { t: 0.1, af: [0.0, 1.3], wp: 0.3 }, strike: { t: 0.42, h: 31, af: [1.0, 0.45], wp: 0.12, ff: [21, 0] }, follow: { t: 0.4, h: 31, af: [0.95, 0.5], wp: 0.16, ff: [21, 0] } },
+  // movement strikes and enders
+  slide:     { wind: { h: 20, t: -0.1, ff: [16, 3], fb: [-10, 0] }, strike: { h: 9, t: -1.0, hd: 0.55, af: [-0.7, 0.4], ab: [-1.2, 0.3], ff: [41, 4], fb: [13, 0] }, follow: { h: 9, t: -0.9, hd: 0.5, af: [-0.7, 0.4], ab: [-1.2, 0.3], ff: [41, 3], fb: [14, 0] } },
+  knee:      { wind: { t: 0.25, h: 31, ff: [8, 8], fb: [-14, 0] }, strike: { t: 0.12, h: 36, ff: [25, 25], fb: [-13, 0] }, follow: { t: 0.08, h: 35, ff: [18, 12], fb: [-12, 0] } },
+  flipkick:  { wind: { h: 25, t: 0.35, ff: [10, 2], fb: [-10, 0] }, strike: { h: 42, t: -0.25, ff: [30, 47], fb: [-2, 14] }, follow: { h: 42, t: -0.1, ff: [13, 28], fb: [0, 20] } },
+  boot:      { wind: { t: -0.2, h: 35, ff: [4, 20], fb: [-10, 0] }, strike: { t: -0.5, h: 36, ff: [44, 37], fb: [-12, 0] }, follow: { t: -0.3, h: 35, ff: [26, 17], fb: [-11, 0] } },
+  divekick:  { wind: { h: 34, t: 0.6, hd: 0.2, ff: [8, 21], fb: [0, 18] }, strike: { h: 34, t: -0.4, ff: [29, 1], fb: [-5, 21] }, follow: { h: 34, t: -0.4, ff: [29, 1], fb: [-5, 21] } },
+  leapslash: { wind: { h: 34, t: 0.5, af: [3.1, 0.5], wp: 0.7, ff: [8, 21], fb: [0, 18] }, strike: { h: 32, t: 0.45, af: [1.35, 0.1], wp: -0.1, ff: [16, 8], fb: [-14, 15] }, follow: { h: 30, t: 0.6, af: [0.7, 0.05], wp: -0.3, ff: [16, 4], fb: [-12, 9] } },
+  hook:      { wind: { t: -0.2, ab: [-0.7, 1.5], af: [0.9, 1.9] }, strike: { t: 0.5, h: 32, ab: [1.6, 0.3], af: [0.3, 2.2], ff: [21, 0] }, follow: { t: 0.58, h: 32, ab: [1.25, 1.4], af: [0.3, 2.2], ff: [21, 0] } },
+  bash:      { wind: { t: 0.15, af: [0.2, 1.5], wp: 0.9 }, strike: { t: 0.5, h: 31, af: [1.3, 0.55], wp: 0.9, ff: [22, 0] }, follow: { t: 0.42, h: 32, af: [1.0, 0.9], wp: 1.0, ff: [20, 0] } },
+  whirl:     { wind: { t: 0.1, af: [2.7, 0.2], wp: 0.1 }, strike: { t: 0.22, h: 32, af: [1.6, 0.1], wp: 0.0, ff: [18, 0] }, follow: { t: 0.22, h: 32, af: [1.6, 0.1], wp: 0.0, ff: [18, 0] } },
+  pound:     { wind: { h: 21, t: 0.55, ff: [12, 0], fb: [-10, 0] }, strike: { h: 36, t: 0.45, af: [2.9, 0.4], ab: [2.7, 0.5], ff: [8, 20], fb: [0, 17] }, follow: { h: 31, t: 0.3, af: [3.2, 0.3], ab: [3.0, 0.4], ff: [13, 7], fb: [-8, 11] } },
+  vault:     { wind: { t: 0.35, h: 30, af: [1.15, 0.3], wp: -0.85 }, strike: { h: 37, t: -0.45, af: [0.25, 0.5], wp: -0.5, ff: [35, 21], fb: [27, 15] }, follow: { h: 37, t: -0.4, af: [0.25, 0.5], wp: -0.5, ff: [34, 19], fb: [26, 13] } },
+  hurl:      { wind: { t: -0.28, af: [2.9, 1.2], wp: -2.53, ff: [8, 0] }, strike: { t: 0.45, h: 32, af: [1.7, 0.1], wp: -0.23, ff: [22, 0] }, follow: { t: 0.5, h: 32, af: [1.0, 0.2], wp: 0.3, ff: [22, 0] } },
+  rip:       { wind: { t: 0.45, h: 27, af: [0.1, 0.6], wp: 0.0 }, strike: { t: 0.02, h: 34, af: [1.7, 0.3], wp: 0.2, ff: [18, 0] }, follow: { t: -0.2, h: 36, af: [2.6, 0.3], wp: 0.3, ff: [17, 0] } },
   // ranged: aim, then a recoil kick
   throw:     { aim: { t: -0.2, af: [3.5, 0.4], ff: [10, 0] }, recoil: { t: 0.38, af: [1.5, 0.15], ff: [19, 0] }, lob: true },
   bow:       { aim: { t: 0.04, af: [1.5, 0.07], wp: 0.0 }, recoil: { t: 0.02, af: [1.52, 0.05], wp: 0.03 } },
   pistol:    { aim: { t: 0.1, af: [1.52, 0.06], ab: [0.2, 0.5], wp: -0.01 }, recoil: { t: 0.03, af: [1.78, 0.28], ab: [0.2, 0.5], wp: 0.38 } },
   long:      { aim: { t: 0.2, af: [0.7, 1.7], wp: -0.83 }, recoil: { t: 0.1, af: [0.56, 1.82], wp: -0.7 } },
-  tube:      { aim: { t: 0.14, af: [0.7, 1.7], wp: -0.83 }, recoil: { t: -0.02, af: [0.6, 1.75], wp: -0.7 } }
+  tube:      { aim: { t: 0.14, af: [0.7, 1.7], wp: -0.83 }, recoil: { t: -0.02, af: [0.6, 1.75], wp: -0.7 } },
+  bowUp:     { aim: { t: -0.3, af: [2.35, 0.07], wp: 0.0 }, recoil: { t: -0.32, af: [2.37, 0.05], wp: 0.03 } },
+  longUp:    { aim: { t: 0.0, af: [1.2, 1.75], wp: -0.83 }, recoil: { t: -0.08, af: [1.08, 1.85], wp: -0.7 } },
+  tubeUp:    { aim: { t: -0.12, af: [1.25, 1.85], wp: -0.83 }, recoil: { t: -0.22, af: [1.15, 1.9], wp: -0.7 } }
 };
 
 const _stanceCache = Object.create(null), _animCache = Object.create(null);
@@ -1119,8 +1299,19 @@ function solveRig(p, sc, w, R, pull) {
   R.kFx = k.jx; R.kFy = k.jy; R.fFx = k.ex; R.fFy = k.ey;
   k = ik2(R.hipx, R.hipy, p[9] * sc, -p[10] * sc, th, sh, 1);
   R.kBx = k.jx; R.kBy = k.jy; R.fBx = k.ex; R.fBy = k.ey;
+  const rot = p[12];
+  if (rot) {                                             // a flip: turn every joint about the waist
+    const c = Math.cos(rot), s = Math.sin(rot), cx = R.hipx, cy = R.hipy - 16 * sc;
+    for (let i = 0; i < ROT_KEYS.length; i += 2) {
+      const kx = ROT_KEYS[i], ky = ROT_KEYS[i + 1], x = R[kx] - cx, y = R[ky] - cy;
+      R[kx] = cx + x * c - y * s; R[ky] = cy + x * s + y * c;
+    }
+    R.wa -= rot; R.hda += rot;
+  }
   return R;
 }
+const ROT_KEYS = ['hipx', 'hipy', 'nkx', 'nky', 'shx', 'shy', 'hdx', 'hdy', 'eFx', 'eFy', 'hFx', 'hFy', 'eBx', 'eBy', 'hBx', 'hBy',
+  'kFx', 'kFy', 'fFx', 'fFy', 'kBx', 'kBy', 'fBx', 'fBy', 'tipx', 'tipy', 'mzx', 'mzy'];
 
 // ───────────────────────── weapon art (local: grip at origin, +x toward the business end) ─────────────────────────
 const WOOD = '#b0753c', STEEL = '#e3e8f0', GUN = '#8f97aa', GUN2 = '#4a5060', BONE = '#f7eed6', BRONZE = '#e6a63c';
@@ -1468,7 +1659,7 @@ function drawFighter(f, o) {
   g.restore();
 
   // weapon, then the near arm over it
-  if (f.weapon && !o.noWeapon) {
+  if (f.weapon && !o.noWeapon && !(f.wopt && f.wopt.hide)) {
     _wFlash = o.ghost ? o.ghost : (f.flash > 0 ? '#ffffff' : null);
     drawWeaponAt(f.weapon, R.hFx, R.hFy, R.wa, sc, f.wopt);
     _wFlash = null;
@@ -1514,9 +1705,11 @@ function drawPortrait(def, x, y, w, h, o) {
 
 // ───────────────────────── combat: effects, fighters, projectiles, world ─────────────────────────
 const AW = 960, XMIN = 46, XMAX = AW - 46;                 // arena width and walls
-const DT = 1 / 60, GRAV = 1500, JUMP_V = 470, WALK = 138, BACK = 104, DASH_V = 470;
+const DT = 1 / 60, GRAV = 1500, JUMP_V = 470, WALK = 138, BACK = 104, RUN = 236;
+const RUSH_V = 640, RUSH_T = 21, FLIP_T = 17;               // the rush covers about 170 units, the back flip about 100
 const ZMIN = 0.72, ZMAX = 1.12;
 const DMG = 0.72;                                          // global damage scale: sets how long a round lasts
+const METER_MAX = 300, JUG_MAX = 5;                        // three bars of meter; hits allowed on one airborne body
 
 function segBox(x0, y0, x1, y1, bx0, by0, bx1, by1) {      // segment vs box (Liang-Barsky)
   let t0 = 0, t1 = 1;
@@ -1661,10 +1854,10 @@ class FX {
 }
 
 // ───────── fighter ─────────
-function footCycle(ph, S, out, i) {
+function footCycle(ph, S, out, i, lift) {
   ph = ((ph % TAU) + TAU) % TAU;
   if (ph < PI) { out[i] += S * (1 - 2 * ph / PI); out[i + 1] = 0; }
-  else { const u = (ph - PI) / PI; out[i] += S * (-1 + 2 * easeIO(u)); out[i + 1] = 6.5 * Math.sin(u * PI); }
+  else { const u = (ph - PI) / PI; out[i] += S * (-1 + 2 * easeIO(u)); out[i + 1] = (lift || 6.5) * Math.sin(u * PI); }
 }
 function walkPose(st, ph, out) {
   copyPose(st, out);
@@ -1674,6 +1867,17 @@ function walkPose(st, ph, out) {
   out[1] = st[1] + 0.04;
   return out;
 }
+function runPose(st, ph, out) {
+  copyPose(st, out);
+  out[7] = 4; out[9] = -4;
+  footCycle(ph, 21, out, 7, 13); footCycle(ph + PI, 21, out, 9, 13);
+  out[0] = st[0] - 3.5 - Math.abs(Math.sin(ph)) * 2.4;
+  out[1] = st[1] + 0.42; out[2] = st[2] - 0.3;
+  out[5] = st[5] + Math.sin(ph) * 0.7;                       // the free arm pumps
+  return out;
+}
+const SPKEY = ['', 'sp1', 'sp2', 'sp3'];
+const ONE_SHOT = [0];
 
 class Fighter {
   constructor(w, def, weaponId, x, facing, o) {
@@ -1686,9 +1890,10 @@ class Fighter {
     this.hpMax = Math.max(1, Math.round(def.hp * (o.hpMul || 1)));
     this.dmgMul = (o.dmgMul || 1) * def.pow; this.spd = def.spd; this.jmp = def.jmp;
     this.rig = newRig(); this.pose = new Array(NP).fill(0); this.from = new Array(NP).fill(0); this.tp = new Array(NP).fill(0);
-    this.tail = { x: x, y: -70 }; this.trail = []; this.trailPrev = null; this.wopt = { loaded: true, pull: 0, run: false };
+    this.tail = { x: x, y: -70 }; this.trail = []; this.trailPrev = null; this.wopt = { loaded: true, pull: 0, run: false, hide: false };
     this._hb = { x0: 0, x1: 0, y0: 0, y1: 0 };
-    this.meter = 0; this.wins = 0; this.dealt = 0; this.taken = 0; this.maxCombo = 0; this.moveId = 0;
+    this.meter = 0; this.wins = 0; this.dealt = 0; this.taken = 0; this.maxCombo = 0; this.moveId = 0; this.rushId = 0;
+    this.used = Object.create(null);                         // how often each kind of move came out (the tutorial reads this)
     this.baseWeapon = weaponId;
     this.setWeapon(weaponId);
     this.reset(x, facing);
@@ -1696,20 +1901,23 @@ class Fighter {
   setWeapon(id) {
     this.weapon = WEAPONS[id]; this.stance = stanceOf(this.weapon);
     this.ammo = this.weapon.fire ? this.weapon.fire.mag : 0; this.reload = 0; this.reloadMax = 1; this.sinceShot = 999;
-    this.wopt.run = false; this.wopt.pull = 0;
+    this.wopt.run = false; this.wopt.pull = 0; this.wopt.hide = false;
   }
   reset(x, facing) {
     this.x = x; this.y = 0; this.vx = 0; this.vy = 0; this.facing = facing;
     this.state = 'idle'; this.st = 0; this.t = (Math.random() * 100) | 0;
     this.hp = this.hpMax; this.hpLag = this.hpMax; this.guardG = 100; this.guardDelay = 0;
     this.move = null; this.mkind = ''; this.mf = 0; this.msu = 0; this.mrc = 0; this.hitDone = false; this.lastHitF = -99; this.chainIdx = 0; this.queued = false;
-    this.buf = { atk: 0, kick: 0, dash: 0, sup: 0 };
-    this.inv = 0; this.stun = 0; this.flash = 0; this.dashCd = 0; this.dashDir = 1; this.dashBack = false; this.jumpLock = 0; this.airJumps = 0; this.upHeld = false;
+    this.buf = { atk: 0, kick: 0, fwd: 0, back: 0, up: 0, down: 0, sp1: 0, sp2: 0, sp3: 0 };
+    this.inv = 0; this.stun = 0; this.flash = 0; this.dashCd = 0; this.rushCd = 0; this.dashDir = 1; this.dashBack = false; this.jumpLock = 0; this.airJumps = 0; this.upHeld = false;
     this.combo = 0; this.juggle = 0; this.armor = false; this.crouching = false; this.airMove = false; this.bounced = false; this.softDown = false;
+    this.running = false; this.runLatch = false; this.runDir = 0; this.stepV = 0; this.autoN = 0; this.armorSpent = false;
+    this.touched = 0; this.spawned = false; this.landLag = 5; this.landLink = false; this.landSlam = false;
+    this.wallHit = false; this.spiked = false; this.jugMove = -1; this.scaleId = -1; this.scaleV = 1; this.pScaleId = -1; this.pScaleV = 1; this.pHits = 0; this.pHitSid = -1;
     this.shots = 0; this.shotAt = -99; this.walkPh = 0; this.hitVar = 0; this.ko = false; this.comboShow = 0; this.comboT = 0;
     if (this.weapon.id !== this.baseWeapon) this.setWeapon(this.baseWeapon);
     this.ammo = this.weapon.fire ? this.weapon.fire.mag : 0; this.reload = 0; this.sinceShot = 999;
-    this.trail.length = 0;
+    this.trail.length = 0; this.wopt.hide = false;
     copyPose(this.stance, this.pose);
     solveRig(this.pose, this.sc, this.weapon, this.rig, 0);
     this.tail.x = x - facing * 12; this.tail.y = this.rig.hdy + 12;
@@ -1718,26 +1926,50 @@ class Fighter {
   canAct() { return this.state === 'idle' || this.state === 'walk' || this.state === 'crouch'; }
   setState(s, keepCrouch) {
     this.state = s; this.st = 0;
-    if (s !== 'attack') { this.move = null; this.armor = false; this.airMove = false; this.wopt.run = false; }
+    if (s !== 'attack') { this.move = null; this.armor = false; this.airMove = false; this.wopt.run = false; this.wopt.hide = false; }
+    if (s !== 'walk') this.running = false;
     if (!keepCrouch) this.crouching = false;
   }
-  recover() { this.setState('idle'); this.combo = 0; this.juggle = 0; this.bounced = false; }
+  recover() { this.setState('idle'); this.combo = 0; this.juggle = 0; this.bounced = false; this.wallHit = false; this.spiked = false; }
   face() { const o = this.opp; if (o && Math.abs(o.x - this.x) > 8) this.facing = o.x > this.x ? 1 : -1; }
+  count(k) { this.used[k] = (this.used[k] || 0) + 1; }
+  gain(v) {
+    const m0 = this.meter;
+    this.meter = Math.min(METER_MAX, m0 + v * this.mods.meter);
+    if (this.isPlayer && ((this.meter / 100) | 0) > ((m0 / 100) | 0)) this.w.sfx('meter');
+  }
   hurtBox() {
-    const sc = this.sc, hw = 13 * sc, hb = this._hb;
-    let h = 84;
-    if (this.state === 'down' || this.state === 'ko') h = 20;
-    else if (this.crouching || this.state === 'crouch' || (this.state === 'dash' && !this.dashBack)) h = 56;
-    else if (this.state === 'air') h = 62;
-    hb.x0 = this.x - hw; hb.x1 = this.x + hw; hb.y0 = this.y - h * sc; hb.y1 = this.y;
+    const sc = this.sc, hw = 13 * sc, hb = this._hb, s = this.state;
+    let h = 84 * sc;
+    if (s === 'down' || s === 'ko') h = 20 * sc;
+    else if (s === 'attack' && this.move && this.move.slide && this.mf < this.msu + this.move.ac + 4) h = 40;      // low enough for anything at chest height to pass over, whatever your size
+    else if (this.crouching || s === 'crouch' || (s === 'rush' && this.st < 9)) h = 56;        // the first steps of a rush duck under a shot; after that it is upright
+    else if (s === 'air') h = 62 * sc;
+    hb.x0 = this.x - hw; hb.x1 = this.x + hw; hb.y0 = this.y - h; hb.y1 = this.y;
     return hb;
   }
 
+  // a swipe, turned into a command relative to where the opponent stands: 1 right, 2 left, 3 up, 4 down, 5 toward
+  swipe(c) {
+    const b = this.buf, o = this.opp;
+    const toward = o && Math.abs(o.x - this.x) > 4 ? (o.x > this.x ? 1 : 2) : (this.facing > 0 ? 1 : 2);
+    b.fwd = b.back = b.up = b.down = 0;
+    if (c === 3) b.up = 13; else if (c === 4) b.down = 13; else if (c === 5 || c === toward) b.fwd = 13; else b.back = 13;
+  }
+
+  // presses and swipes go into the buffer every step, including the frozen frames of a hit, so none are ever dropped
+  feed(inp) {
+    const b = this.buf;
+    if (inp.atkP) b.atk = 11; if (inp.kickP) b.kick = 11;
+    if (inp.sp1P) b.sp1 = 17; if (inp.sp2P) b.sp2 = 17; if (inp.sp3P) b.sp3 = 17;
+    if (inp.sw) this.swipe(inp.sw);
+  }
   update(inp) {
     this.t++; this.st++;
     if (this.inv > 0) this.inv--;
     if (this.flash > 0) this.flash--;
     if (this.dashCd > 0) this.dashCd--;
+    if (this.rushCd > 0) this.rushCd--;
     if (this.jumpLock > 0) this.jumpLock--;
     if (this.comboT > 0) this.comboT--;
     this.sinceShot++;
@@ -1747,19 +1979,20 @@ class Fighter {
       else if (this.ammo < W.fire.mag && this.sinceShot > 140 && this.state !== 'attack') this.startReload();
     }
     if (this.guardDelay > 0) this.guardDelay--; else if (this.guardG < 100) this.guardG = Math.min(100, this.guardG + 0.45);
-    if (b.atk > 0) b.atk--; if (b.kick > 0) b.kick--; if (b.dash > 0) b.dash--; if (b.sup > 0) b.sup--;
-    if (inp.atkP) b.atk = 9; if (inp.kickP) b.kick = 9; if (inp.dashP) b.dash = 8; if (inp.supP) b.sup = 14;
+    if (b.atk > 0) b.atk--; if (b.kick > 0) b.kick--; if (b.fwd > 0) b.fwd--; if (b.back > 0) b.back--; if (b.up > 0) b.up--; if (b.down > 0) b.down--;
+    if (b.sp1 > 0) b.sp1--; if (b.sp2 > 0) b.sp2--; if (b.sp3 > 0) b.sp3--;
     const dir = (inp.r ? 1 : 0) - (inp.l ? 1 : 0);
     const upEdge = inp.u && !this.upHeld; this.upHeld = inp.u;
+    if (this.runLatch && dir !== this.runDir) this.runLatch = false;
 
     switch (this.state) {
       case 'idle': case 'walk': case 'crouch': this.neutral(inp, dir); break;
       case 'guard':
         this.face();
-        if (b.sup > 0 && this.meter >= 100) { b.sup = 0; this.startSuper(); break; }
-        if (b.dash > 0 && this.dashCd <= 0) { b.dash = 0; this.startDash(dir || -this.facing); break; }
+        if (this.command(inp)) break;                      // anything can come straight out of a guard
         if (!inp.guard) { this.setState('idle'); break; }
         this.crouching = !!inp.d; this.vx *= 0.7;
+        if (this.st === 18) this.count('held');             // a deliberate guard, not the flicker of a slow tap
         break;
       case 'jump':
         if (dir) { const mx = WALK * 1.35 * this.spd; this.vx = clamp(this.vx + dir * 900 * DT, -mx, mx); }
@@ -1767,44 +2000,63 @@ class Fighter {
           this.airJumps--; this.vy = -JUMP_V * this.jmp * 0.92; this.st = 0;
           this.w.fx.ring(this.x, this.y, 4, 26, 10, '#ffffff', 2.4); this.w.sfx('jump');
         }
-        if (b.atk > 0) { b.atk = 0; this.startAttack(false); }
-        else if (b.kick > 0) { b.kick = 0; this.startMove(AIRKICK, 'melee', false); }
+        if (b.up > 0 && this.st <= 9 && this.vy < 0) { b.up = 0; this.startLeap(); }       // a jump turned into a leap
+        else if (b.atk > 0) { b.atk = 0; this.startAttack(false); }
+        else if (b.kick > 0 || b.down > 0) { b.kick = b.down = 0; this.startMove(AIRKICK, 'melee', false); }
         break;
       case 'attack': this.updateMove(inp); break;
-      case 'dash': {
-        const T = this.dashBack ? 12 : 13;
-        this.vx = this.dashDir * DASH_V * (1 - (this.st / T) * 0.55) * (this.dashBack ? 0.9 : 1) * (0.8 + 0.2 * this.spd);
+      case 'rush': this.updateRush(dir); break;
+      case 'dash':                                          // the back flip
+        this.vx = this.dashDir * 520 * (1 - (this.st / FLIP_T) * 0.6) * (0.85 + 0.15 * this.spd);
         if (this.st % 3 === 1) this.w.fx.ghost(this);
-        if (!this.dashBack && this.st >= 5) {
-          if (b.atk > 0) { b.atk = 0; this.dashCd = Math.round(26 * this.mods.dashCd); this.startAttack(false); break; }
-          if (b.kick > 0) { b.kick = 0; this.dashCd = Math.round(26 * this.mods.dashCd); this.startKick(false); break; }
-        }
-        if (this.st >= T) { this.setState('idle'); this.dashCd = Math.round(26 * this.mods.dashCd); this.vx *= 0.4; }
+        if (this.st >= FLIP_T) { this.setState('idle'); this.dashCd = Math.round(30 * this.mods.dashCd); this.vx *= 0.3; this.w.fx.dust(this.x, 0, 3, 0); }
         break;
-      }
       case 'hit': this.vx *= 0.86; if (--this.stun <= 0) this.recover(); break;
       case 'block':
         this.vx *= 0.84;
         if (--this.stun <= 0) { if (inp.guard) { this.setState('guard'); this.crouching = !!inp.d; } else this.setState('idle'); }
         break;
       case 'dizzy': this.vx *= 0.8; if (--this.stun <= 0) { this.guardG = 70; this.recover(); } break;
-      case 'air': if (this.juggle >= 3) this.inv = 2; break;
+      case 'air': if (this.juggle >= JUG_MAX) this.inv = 2; break;
       case 'down': this.inv = 2; this.vx *= 0.8; if (this.st > (this.softDown ? 16 : 30)) this.setState('getup'); break;
-      case 'getup': this.inv = 2; this.vx = 0; if (this.st > 15) { this.recover(); this.inv = 10; } break;
-      case 'land': this.vx *= 0.7; if (this.st > 5) this.setState('idle'); break;
+      case 'getup': this.inv = 2; this.vx = 0; if (this.st > 15) { this.recover(); this.inv = 4; } break;      // a moment of safety on the way up: enough to get a guard raised, not to swing for free
+      case 'land':
+        this.vx *= 0.7;
+        if (this.landLink && this.st >= 2 && this.command(inp)) break;       // a leap that connected flows straight on
+        if (this.st > this.landLag) this.setState('idle');
+        break;
       case 'ko': this.inv = 2; this.vx *= 0.85; break;
       default: this.vx *= 0.7; break;                      // 'win', 'pose'
     }
     this.physics();
   }
 
-  neutral(inp, dir) {
+  // buffered commands, most urgent first. Returns true if one of them started.
+  command(inp) {
     const b = this.buf;
+    if (this.trySpecial()) return true;
+    if (b.fwd > 0) { if (this.rushCd <= 0) { b.fwd = 0; this.startRush(); return true; } if (b.fwd < 2) b.fwd = 2; }    // waits out the cooldown
+    if (b.back > 0 && this.dashCd <= 0) { b.back = 0; this.startFlip(); return true; }
+    if (b.up > 0) { b.up = 0; this.startLeap(); return true; }
+    if (b.down > 0) { b.down = 0; this.startSlide(); return true; }
+    if (b.atk > 0) { b.atk = 0; this.startAttack(inp.d); return true; }
+    if (b.kick > 0) { b.kick = 0; this.startKick(inp.d); return true; }
+    return false;
+  }
+  trySpecial() {
+    const b = this.buf;
+    for (let k = 3; k >= 1; k--) {
+      const key = SPKEY[k];
+      if (b[key] <= 0) continue;
+      b[key] = 0;
+      if (this.meter >= k * 100) { this.startSpecial(k); return true; }
+      if (this.isPlayer) this.w.sfx('uiNo');
+    }
+    return false;
+  }
+  neutral(inp, dir) {
     this.face();
-    if (b.sup > 0 && this.meter >= 100) { b.sup = 0; return this.startSuper(); }
-    if (b.dash > 0 && this.dashCd <= 0) { b.dash = 0; return this.startDash(dir || this.facing); }
-    if (b.atk > 0) { b.atk = 0; return this.startAttack(inp.d); }
-    if (b.kick > 0) { b.kick = 0; return this.startKick(inp.d); }
+    if (this.command(inp)) return;
     const F = this.weapon.fire;
     if (inp.atk && F && (!F.mag || this.ammo > 0)) return this.startAttack(inp.d);          // holding the button keeps a ranged weapon firing
     if (inp.guard) { this.setState('guard'); this.crouching = !!inp.d; this.vx = 0; return; }
@@ -1812,8 +2064,11 @@ class Fighter {
     if (inp.d) { if (this.state !== 'crouch') this.setState('crouch'); this.crouching = true; this.vx *= 0.6; return; }
     if (dir) {
       if (this.state !== 'walk') this.setState('walk');
-      const fwd = dir === this.facing, v = (fwd ? WALK : BACK) * this.spd;
-      this.vx = dir * v; this.walkPh += (fwd ? 1 : -1) * PI * v * DT / 26;
+      const fwd = dir === this.facing;
+      this.running = fwd && (inp.run || this.runLatch);
+      const v = (this.running ? RUN : fwd ? WALK : BACK * (inp.run ? 1.25 : 1)) * this.spd;
+      this.vx = dir * v; this.walkPh += (fwd ? 1 : -1) * PI * v * DT / (this.running ? 36 : 26);
+      if (this.running && this.t % 8 === 0) this.w.fx.dust(this.x - dir * 8, 0, 1, -dir);
     } else { if (this.state !== 'idle') this.setState('idle'); this.vx *= 0.5; }
   }
   jump(dir) {
@@ -1822,39 +2077,102 @@ class Fighter {
     this.airJumps = this.mods.airJumps;
     this.w.sfx('jump'); this.w.fx.dust(this.x, 0, 3, 0);
   }
-  startDash(dir) {
-    this.setState('dash');
-    this.dashDir = dir; this.dashBack = dir !== this.facing;
-    if (this.dashBack) this.inv = Math.max(this.inv, 9);
-    this.w.sfx('dash'); this.w.fx.dust(this.x, 0, 4, -dir);
+  // swipe toward: a low, fast run-up that strikes on its own when it arrives
+  startRush() {
+    this.face();
+    this.setState('rush'); this.dashDir = this.facing; this.rushId++;
+    this.w.sfx('dash'); this.w.fx.dust(this.x, 0, 5, -this.facing); this.count('rush');
   }
+  updateRush(dir) {
+    const b = this.buf, o = this.opp, W = this.weapon;
+    this.vx = this.dashDir * RUSH_V * (1 - (this.st / RUSH_T) * 0.5) * (0.8 + 0.2 * this.spd);
+    this.walkPh += PI * Math.abs(this.vx) * DT / 36;
+    if (this.st % 3 === 1) this.w.fx.ghost(this);
+    const cd = Math.round(34 * this.mods.dashCd);
+    if (b.atk > 0 && b.atk < 4) b.atk = 4;                  // a tap during the run-up is kept for when it lands
+    if (this.st >= 3) {
+      if (this.trySpecial()) { this.rushCd = cd; return; }
+      if (b.up > 0) { b.up = 0; this.rushCd = cd; return this.startLeap(); }
+      if (b.down > 0) { b.down = 0; this.rushCd = cd; return this.startSlide(); }
+      if (b.back > 0 && this.dashCd <= 0) { b.back = 0; this.rushCd = cd; return this.startFlip(); }
+      if (o && !o.ko && o.state !== 'down' && o.state !== 'getup') {
+        const gap = (o.x - this.x) * this.dashDir, m = W.rush;
+        if (gap > 0 && gap <= (m.r1 - 8) * this.sc + 13 * o.sc && Math.abs(o.y - this.y) < 78) { this.rushCd = cd; return this.startMove(m, 'melee', false); }
+      }
+    }
+    if (this.st >= RUSH_T) {
+      this.rushCd = cd;
+      if (dir === this.dashDir) { this.setState('walk'); this.runLatch = true; this.runDir = dir; this.running = true; }
+      else { this.setState('idle'); this.vx *= 0.4; }
+    }
+  }
+  // swipe away: a back flip that cannot be hit on the way up
+  startFlip() {
+    this.face();
+    this.setState('dash'); this.dashDir = -this.facing; this.dashBack = true;
+    this.inv = Math.max(this.inv, 11);
+    this.w.sfx('flip'); this.w.fx.dust(this.x, 0, 4, this.facing); this.count('flip');
+  }
+  // swipe up: somersault toward them and come down swinging
+  startLeap(again) {
+    const o = this.opp, wasGround = this.grounded;
+    this.face();
+    const vy = JUMP_V * this.jmp * 0.92, T = 2 * vy / GRAV;        // high enough to clear a shot at chest height
+    const d = o ? Math.abs(o.x - this.x) : 120;
+    if (wasGround) { this.y = -0.01; this.vy = -vy; this.airJumps = this.mods.airJumps; }
+    else if (again) { this.vy = -vy * 0.86; this.airJumps--; this.w.fx.ring(this.x, this.y, 4, 26, 10, '#ffffff', 2.4); }
+    else this.airJumps = 0;
+    this.vx = this.facing * clamp((d - 34) / T, 50, 340 * this.spd);
+    this.startMove(this.weapon.leap, 'melee', false);
+    this.w.sfx('flip'); if (wasGround) this.w.fx.dust(this.x, 0, 4, 0); this.count('leap');
+  }
+  startSlide() { this.startMove(SLIDE, 'melee', false); this.w.sfx('dash'); this.w.fx.dust(this.x, 0, 5, -this.facing); this.count('slide'); }
   startAttack(crouch) {
     const W = this.weapon;
+    if (this.grounded) this.face();
+    this.count('atk');
     if (W.fire) {
       if (W.fire.mag && this.ammo <= 0) {                  // empty: the button still does something
         if (this.grounded) return this.startKick(crouch);
         return this.startMove(AIRKICK, 'melee', false);
       }
       if (this.reload > 0) this.reload = 0;                // firing cancels a top-up reload
-      return this.startMove(W.fire, 'fire', crouch);
+      this.startMove(W.fire, 'fire', crouch);
+      this.autoN = W.fire.auto ? 4 : 0;                    // one tap of an automatic is a short burst
+      return;
     }
     this.chainIdx = 0;
-    this.startMove(W.chain[0], 'melee', crouch);
+    const m = W.chain[0], o = this.opp;
+    this.startMove(m, 'melee', crouch);
+    if (o && this.grounded && !o.ko) {                     // a tap from just outside reach steps in on its own
+      const gap = Math.abs(o.x - this.x) - 13 * o.sc - m.r1 * this.sc + 8;
+      if (gap > 0 && gap < 40 && (o.x - this.x) * this.facing > 0) this.stepV = Math.min(240, gap / (this.msu * DT));
+    }
   }
   startKick(crouch) { this.startMove(crouch ? SWEEP : KICK, 'melee', !!crouch); }
-  startSuper() {
-    this.meter = 0;
-    const m = this.weapon.sup, w = this.w;
+  startEnder(m) {
     this.face();
-    this.startMove(m, m.proj ? 'fire' : 'melee', false);
-    this.armor = true;
-    w.superFreeze(this);
+    this.startMove(m, 'melee', false);
+    this.chainIdx = -1; this.stepV = 150;
+    if (m === this.weapon.launch) this.count('launchTry');
+  }
+  startSpecial(k) {
+    const W = this.weapon, m = k === 3 ? W.sup : W.sp[k - 1], w = this.w;
+    this.meter = Math.max(0, this.meter - k * 100);
+    this.face();
+    if (m.k === 'fire' && this.reload > 0 && W.fire.mag && this.ammo <= 0) { /* specials bring their own ammunition */ }
+    this.startMove(m, m.k, false);
+    this.chainIdx = -1;
+    if (k === 3) { this.armor = true; w.superFreeze(this, m.name); } else w.specialFlash(this, m.name);
+    this.count('special');
   }
   startMove(m, kind, crouch) {
     const air = !this.grounded;
     this.setState('attack', true);
     this.move = m; this.mkind = kind; this.mf = 0; this.moveId++;
     this.hitDone = false; this.lastHitF = -99; this.queued = false; this.shots = 0; this.shotAt = -99;
+    this.touched = 0; this.spawned = false; this.stepV = 0; this.autoN = 0; this.landLink = false; this.wopt.hide = false; this.armorSpent = false;
+    if (!m.sup) this.inv = 0;                                 // attacking gives up whatever protection you had
     this.crouching = !!crouch && !air; this.airMove = air;
     this.msu = kind === 'fire' ? Math.max(3, Math.round(m.su * (m.sup ? 1 : this.mods.draw))) : m.su;
     this.mrc = Math.max(4, Math.round(m.rc * (kind === 'melee' ? this.mods.recover : 1)));
@@ -1872,27 +2190,57 @@ class Fighter {
   }
 
   updateMove(inp) {
-    const m = this.move, f = this.mf, b = this.buf, grounded = this.grounded, w = this.w;
+    const m = this.move, f = this.mf, b = this.buf, w = this.w, W = this.weapon;
+    let grounded = this.grounded;
     if (this.mkind === 'melee') {
       const su = this.msu, endA = su + m.ac;
+      if (m.hop && f === (m.hopAt || 0) && grounded) {       // the move leaves the ground
+        let hv = m.hopVx || 0;
+        if (m.hopAim) { const o = this.opp; hv = o ? clamp((Math.abs(o.x - this.x) - 18) / (2 * m.hop / GRAV), 0, 300) : 120; }
+        this.vy = -m.hop; this.y = -0.01; this.vx = this.facing * hv; this.airMove = true; grounded = false;
+        w.sfx('jump'); w.fx.dust(this.x, 0, 5, 0);
+      }
       if (grounded) {
-        if (m.lunge && f >= (m.lungeAt || 0) && f < endA) this.vx = this.facing * m.lunge;
-        else if (this.chainIdx > 0 && f < su && this.weapon.chain && this.weapon.chain[this.chainIdx] === m) this.vx = this.facing * 150;   // step in behind the last hit
+        // moves that travel stop short of running underneath a body that is in the air; only specials go through
+        const o = this.opp, room = m.special || m.sup || !o || o.grounded || (o.x - this.x) * this.facing > 30 * this.sc;
+        if (m.lunge && f >= (m.lungeAt || 0) && f < endA) this.vx = room ? this.facing * m.lunge : this.vx * 0.6;
+        else if (f < su && this.stepV) this.vx = room ? this.facing * this.stepV : this.vx * 0.6;      // step in behind the last hit
         else this.vx *= 0.8;
       }
       if (f === su - 1) w.sfx(m.saw ? 'saw' : 'swing', m.heavy ? 1 : 0);
       this.armor = f >= (m.armorFrom || 0) && f < endA ? (m.sup ? true : m.armor || false) : false;
       if (m.sup && f < endA) { this.inv = Math.max(this.inv, 2); if (f % 2 === 0) w.fx.ghost(this, RED); }
+      else if ((m.special || m.leap) && f < endA && f % 3 === 0) w.fx.ghost(this);
       this.wopt.run = !!m.saw && f >= su - 4 && f < endA;
+      this.wopt.hide = !!m.hideFrom && f >= m.hideFrom;
       if (m.saw && f > su && f < endA && f % 6 === 0) w.sfx('saw');
       if (m.quake && f === su + 1 && grounded) { w.fx.dust(this.x + this.facing * 50, 0, 8, 0); w.fx.ring(this.x + this.facing * 50, 0, 6, 46, 12, '#ffffff', 3); w.addShake(9); w.sfx('thud'); }
-      const ch = this.weapon.chain, inChain = !!ch && ch[this.chainIdx] === m && !this.airMove;
-      if (inChain && b.atk > 0 && f >= 2 && this.chainIdx + 1 < ch.length) { this.queued = true; b.atk = 0; }
-      if (inChain && this.queued && f >= endA + 3 && this.chainIdx + 1 < ch.length && grounded) {
-        this.chainIdx++;
-        const cr = this.crouching;
-        this.startMove(ch[this.chainIdx], 'melee', cr);
-        return;
+      if (m.spawn && !this.spawned && f >= m.spawn.at) { this.spawned = true; this.spawnProj(m.spawn); }
+      if (m.leap && !grounded && b.up > 0 && this.airJumps > 0 && f >= 8) { b.up = 0; return this.startLeap(true); }      // a second leap in mid-air, for those who have one
+
+      // what this move can flow into
+      const ch = W.chain, inChain = !!ch && this.chainIdx >= 0 && ch[this.chainIdx] === m && !this.airMove;
+      if (grounded && !this.airMove) {
+        const hit = this.touched === 1;
+        if (f < endA + 2 && (this.touched || m.link)) {         // entered early: hold it until the move can be cancelled
+          if (b.up > 0 && b.up < 3) b.up = 3; if (b.fwd > 0 && b.fwd < 3) b.fwd = 3; if (b.down > 0 && b.down < 3) b.down = 3;
+          if (m.link && b.atk > 0 && b.atk < 3) b.atk = 3;
+        }
+        if (this.touched && !m.special && !m.sup && f >= su + 1 && this.trySpecial()) return;       // any normal that touched cancels into a special
+        if (f >= endA + 2 && (m.link ? hit : inChain && this.touched > 0)) {
+          if (b.up > 0) { b.up = 0; if (m === W.launch) return this.startLeap(); return this.startEnder(W.launch); }
+          if (b.fwd > 0 && m !== W.smash) { b.fwd = 0; return this.startEnder(W.smash); }
+          if (b.down > 0) { b.down = 0; return this.startEnder(SWEEP); }
+          if (m.link && b.atk > 0) { b.atk = 0; return this.startAttack(false); }
+        }
+        if (inChain && b.atk > 0 && f >= 2 && this.chainIdx + 1 < ch.length) { this.queued = true; b.atk = 0; }
+        if (inChain && this.queued && f >= endA + 3 && this.chainIdx + 1 < ch.length) {
+          this.chainIdx++;
+          const cr = this.crouching;
+          this.startMove(ch[this.chainIdx], 'melee', cr);
+          this.stepV = 150; this.count('atk');
+          return;
+        }
       }
       if (f >= endA + this.mrc) return this.endMove();
     } else {
@@ -1901,45 +2249,86 @@ class Fighter {
       if (this.shots === 0) { if (f >= su) this.fireShot(m); }
       else {
         const since = f - this.shotAt;
-        if (b.atk > 0 && !m.auto && !m.burst) { this.queued = true; b.atk = 0; }
+        if (b.atk > 0 && !m.burst) {
+          b.atk = 0;
+          if (m.auto) this.autoN = Math.max(this.autoN, this.shots + 4); else this.queued = true;
+        }
         const can = !!m.free || !m.mag || this.ammo > 0;
-        const more = m.burst ? this.shots < m.burst : (m.refire < 900 && (m.auto ? inp.atk : this.queued));
+        const more = m.burst ? this.shots < m.burst : (m.refire < 900 && (m.auto ? (inp.atk || this.shots < this.autoN) : this.queued));
         if (more && can) { if (since >= m.refire) this.fireShot(m); }
-        else if (since >= this.mrc) return this.endMove();
+        else {
+          if (grounded && !m.burst && since >= 7) {            // a swipe cuts the recovery short, so a gunner can shoot and move
+            if (b.back > 0 && this.dashCd <= 0) { b.back = 0; return this.startFlip(); }
+            if (b.fwd > 0 && this.rushCd <= 0) { b.fwd = 0; return this.startRush(); }
+            if (b.up > 0) { b.up = 0; return this.startLeap(); }
+            if (b.down > 0) { b.down = 0; return this.startSlide(); }
+          }
+          if (since >= this.mrc) return this.endMove();
+        }
       }
     }
     this.mf++;
   }
   fireShot(m) {
-    const P = PROJ[m.proj], w = this.w, fc = this.facing, R = this.rig, sc = this.sc;
+    const P = PROJ[m.proj], w = this.w, fc = this.facing, R = this.rig, sc = this.sc, o = this.opp;
     this.shots++; this.shotAt = this.mf; this.sinceShot = 0; this.queued = false;
     if (m.mag && !m.free) { this.ammo--; if (this.ammo <= 0) this.startReload(); }
-    const lob = !!ANIM[m.anim].lob;
+    const lob = !!ANIM[m.anim].lob, mul = m.dmgMul || 1, nm = !!(m.special || m.sup);
     const mx = lob ? this.x + fc * 16 * sc : this.x + fc * R.mzx;
     const my = lob ? this.y - (this.crouching ? 52 : 76) * sc : this.y + R.mzy;
-    const n = P.n || 1;
-    for (let i = 0; i < n; i++) {
-      let a = -(P.up || 0) + (P.spread ? rand(-P.spread, P.spread) : 0);
-      let spd = P.spd * (n > 1 ? rand(0.92, 1.05) : 1);
-      if (m.burst && lob) { spd *= 0.8 + 0.22 * this.shots; a += rand(-0.08, 0.08); }
-      w.projs.push(new Proj(w, this, P, mx, my, fc * Math.cos(a) * spd, Math.sin(a) * spd, m.dmgMul || 1));
+    // hits from one volley share one damage scale: a whole special counts as a single volley, otherwise each shot does
+    const sid = this.moveId * 64 + (nm ? 0 : this.shots), ox = lob ? undefined : this.x + fc * 12 * sc;
+    const add = (x, y, vx, vy) => { const pr = new Proj(w, this, P, x, y, vx, vy, mul, nm); pr.sid = sid; pr.ox = ox; w.projs.push(pr); };
+    if (m.rain) {                                            // arrows that come down on the target
+      const tx = o ? clamp(o.x + o.vx * 0.25, XMIN, XMAX) : this.x + fc * 300;
+      for (let i = 0; i < m.rain; i++) { const pr = new Proj(w, this, P, tx + rand(-26, 26) - fc * 36, -470 - i * 62, fc * 50, 800, mul, nm); pr.sid = sid; w.projs.push(pr); }
+      w.fx.ring(tx, -2, 6, 64, 34, RED, 2);
+    } else if (m.aimAt) {                                    // lobbed so that it lands on them
+      const T = m.aimT || 1.12, bx = o ? o.x : this.x + fc * 300, A = m.aimAt;
+      for (let i = m.salvo ? 0 : (this.shots - 1) % A.length, n = m.salvo ? A.length : i + 1; i < n; i++)
+        add(mx, my, fc * clamp((bx + A[i] - mx) * fc, 60, 780) / T, (-my - 0.5 * P.g * T * T) / T);
+    } else {
+      const angs = m.multiA || ONE_SHOT, n = P.n || 1;
+      for (let j = 0; j < angs.length; j++) for (let i = 0; i < n; i++) {
+        let a = -(P.up || 0) - angs[j] + (P.spread ? rand(-P.spread, P.spread) : 0);
+        if (m.sweep) a += lerp(m.sweep[0], m.sweep[1], (this.shots - 1) / Math.max(1, m.burst - 1));
+        let spd = P.spd * (n > 1 ? rand(0.92, 1.05) : 1);
+        if (m.burst && lob) { spd *= 0.8 + 0.22 * this.shots; a += rand(-0.08, 0.08); }
+        add(mx, my, fc * Math.cos(a) * spd, Math.sin(a) * spd);
+      }
     }
     if (m.recoil) this.vx -= fc * m.recoil * (this.grounded ? 1 : 0.6);
     if (m.shake) w.addShake(m.shake);
     const snd = m.snd;
     if (snd === 'pistol') w.sfx('shot'); else if (snd === 'heavy' || snd === 'auto' || snd === 'rifle' || snd === 'powder') w.sfx('shot', snd); else w.sfx(snd);
-    if (!lob && m.anim !== 'bow' && m.proj !== 'bolt') {
-      w.fx.muzzle(mx + fc * 2, my, fc, m.proj === 'pellet' || m.proj === 'sniper' || m.proj === 'ball' ? 13 : m.proj === 'rocket' ? 15 : 8);
+    if (!lob && m.anim !== 'bow' && m.anim !== 'bowUp' && P.kind !== 'bolt' && P.kind !== 'firebolt' && P.kind !== 'frag') {
+      const big = P.kind === 'pellet' || P.kind === 'tracer' || P.kind === 'ball' || P.kind === 'slug';
+      w.fx.muzzle(mx + fc * 2, my, fc, big ? 13 : P.kind === 'rocket' ? 15 : 8);
       if (m.shell) w.fx.shell(this.x + fc * R.hFx, this.y + R.hFy - 3, fc);
       if (m.smoke) w.fx.smoke(mx + fc * 8, my, 9, 7, false);
       if (m.backblast) { w.fx.smoke(this.x - fc * 26, my, 8, 7, false); w.fx.spark(this.x - fc * 22, my, -fc, 6, '#ffd76a', 260); }
     }
   }
+  // a melee special that throws something: a blade of air, a spear, a shockwave
+  spawnProj(sp) {
+    const P = PROJ[sp.proj], w = this.w, fc = this.facing, sc = this.sc, a = -(P.up || 0);
+    const x = this.x + fc * (sp.x || 30) * sc, y = sp.ground ? -5 : this.y - (sp.y || 48) * sc;
+    w.projs.push(new Proj(w, this, P, x, y, fc * Math.cos(a) * P.spd, Math.sin(a) * P.spd, sp.dmgMul || 1, true));
+    w.sfx(sp.snd || 'wave');
+  }
+  // the landing of a ground pound
+  pound(m) {
+    const w = this.w, o = this.opp, P = m.pound;
+    w.fx.ring(this.x, -2, 10, P.r * 1.15, 16, '#ffffff', 5); w.fx.dust(this.x - 30, 0, 6, -1); w.fx.dust(this.x + 30, 0, 6, 1);
+    w.addShake(14); w.sfx('quake'); w.hitstop = Math.max(w.hitstop, 4);
+    if (o && Math.abs(o.x - this.x) < P.r + 13 * o.sc && o.y > -46)
+      w.applyHit(this, o, { dmg: P.dmg * this.dmgMul * this.mods.melee, stun: 24, kbx: 120, kby: P.kby, launch: true, heavy: true, blunt: true, gb: 3, dir: o.x >= this.x ? 1 : -1, x: o.x, y: o.y - 20 * o.sc, nometer: true, mid: this.moveId });
+  }
   // the active hit box for this frame, or null
   meleeBox() {
     if (this.state !== 'attack' || this.mkind !== 'melee' || !this.move) return null;
     const m = this.move, f = this.mf - 1, su = this.msu;
-    if (f < su || f >= su + m.ac) return null;
+    if (m.noBox || f < su || f >= su + m.ac) return null;
     if (this.hitDone && !(m.multi && f - this.lastHitF >= m.multi)) return null;
     const sc = this.sc;
     let y0 = m.y0, y1 = m.y1;
@@ -1958,20 +2347,36 @@ class Fighter {
     this.x += this.vx * DT;
     if (this.x < XMIN) {
       this.x = XMIN;
-      if (this.state === 'air' && this.vx < -170) { this.vx *= -0.35; this.w.fx.dust(XMIN - 4, this.y - 40, 4, 1); this.w.sfx('thud'); this.w.addShake(5); } else if (this.vx < 0) this.vx = 0;
+      if (this.state === 'air' && this.vx < -170) this.wallBounce(1); else if (this.vx < 0) this.vx = 0;
     } else if (this.x > XMAX) {
       this.x = XMAX;
-      if (this.state === 'air' && this.vx > 170) { this.vx *= -0.35; this.w.fx.dust(XMAX + 4, this.y - 40, 4, -1); this.w.sfx('thud'); this.w.addShake(5); } else if (this.vx > 0) this.vx = 0;
+      if (this.state === 'air' && this.vx > 170) this.wallBounce(-1); else if (this.vx > 0) this.vx = 0;
     }
+  }
+  // thrown hard into the edge of the arena: they come back off it, and the first time they stay up long enough for one more hit
+  wallBounce(dir) {
+    const w = this.w, hard = Math.abs(this.vx) > 300 && !this.wallHit && !this.ko;
+    this.vx *= hard ? -0.42 : -0.35;
+    if (hard) { this.wallHit = true; this.vy = Math.min(this.vy, -250); w.fx.ring(this.x, this.y - 44, 8, 60, 12, '#ffffff', 4); w.hitstop = Math.max(w.hitstop, 5); }
+    w.fx.dust(this.x - dir * 4, this.y - 40, hard ? 8 : 4, dir); w.sfx('thud'); w.addShake(hard ? 9 : 5);
   }
   onLand(vy0) {
     const w = this.w;
     switch (this.state) {
       case 'jump': this.setState('idle'); this.jumpLock = 4; w.fx.dust(this.x, 0, 3, 0); w.sfx('land'); break;
-      case 'attack': if (this.airMove) { this.setState('land'); w.fx.dust(this.x, 0, 3, 0); w.sfx('land'); } break;
+      case 'attack':
+        if (this.airMove) {
+          const m = this.move, t = this.touched;
+          const lag = m && m.landLag ? m.landLag : m && m.leap ? (t === 1 ? 5 : t === 2 ? 13 : 9) : 5;
+          const link = !!m && !!m.leap && t === 1, slam = !!m && !!m.pound;
+          if (slam) this.pound(m);
+          this.setState('land'); this.landLag = lag; this.landLink = link; this.landSlam = slam;
+          w.fx.dust(this.x, 0, 3, 0); w.sfx('land');
+        }
+        break;
       case 'air':
         if (!this.bounced && vy0 > 430) {
-          this.bounced = true; this.y = -0.5; this.vy = -vy0 * 0.34; this.vx *= 0.6;
+          this.bounced = true; this.y = -0.5; this.vy = -vy0 * (this.spiked ? 0.46 : 0.34); this.vx *= 0.6; this.spiked = false;
           w.fx.dust(this.x, 0, 7, 0); w.sfx('thud'); w.addShake(6);
         } else {
           this.setState(this.ko ? 'ko' : 'down'); this.vx *= 0.4;
@@ -1996,8 +2401,9 @@ class Fighter {
       else lerpPose(A.follow, this.stance, easeIO(clamp((f - endA) / this.mrc, 0, 1)), out);
       if (m.multi && f >= su && f < endA) {
         if (m.saw) { const j = Math.sin(f * 2.6); out[3] += j * 0.07; out[11] += j * 0.06; out[1] += j * 0.02; }
-        else lerpPose(A.strike, A.wind, 0.5 - 0.5 * Math.cos((f - su) * 2.1), out);          // a flurry
+        else if (!m.spin) lerpPose(A.strike, A.wind, 0.5 - 0.5 * Math.cos((f - su) * 2.1), out);          // a flurry
       }
+      if (m.spin && f >= su && f < endA) out[3] += m.spin * TAU * ((f - su) / m.ac);          // the weapon arm windmills
     } else {
       const su = this.msu, s = f - this.shotAt;
       if (A.lob) {
@@ -2010,6 +2416,7 @@ class Fighter {
         else if (s < 5) lerpPose(A.recoil, A.aim, s / 5, out);
         else if (s > this.mrc - 7) lerpPose(A.aim, this.stance, clamp((s - (this.mrc - 7)) / 7, 0, 1), out);
         else copyPose(A.aim, out);
+        if (m.sweep && this.shots > 0) out[11] -= lerp(m.sweep[0], m.sweep[1], clamp((this.shots - 1) / Math.max(1, m.burst - 1), 0, 1));
       }
     }
     if (this.crouching && !m.abs) {
@@ -2021,13 +2428,20 @@ class Fighter {
       out[0] = J[0]; out[7] = J[7]; out[8] = J[8]; out[9] = J[9]; out[10] = J[10];
     }
   }
+  bodyRot() {
+    const s = this.state;
+    if (s === 'dash') return -TAU * easeIO(clamp(this.st / (FLIP_T - 2), 0, 1));
+    if (s === 'attack' && this.move && this.move.rot) { const m = this.move; return m.rot * TAU * easeIO(clamp((this.mf - (m.rotAt || 0)) / m.rotDur, 0, 1)); }
+    return 0;
+  }
   computePose(out) {
     const W = this.weapon, st = this.stance, t = this.t;
     switch (this.state) {
-      case 'walk': walkPose(st, this.walkPh, out); break;
+      case 'walk': if (this.running) runPose(st, this.walkPh, out); else walkPose(st, this.walkPh, out); break;
       case 'crouch': copyPose(poseOf(W, 'crouch'), out); break;
       case 'jump': copyPose(poseOf(W, this.vy < 0 ? 'jumpUp' : 'jumpFall'), out); break;
-      case 'dash': copyPose(poseOf(W, this.dashBack ? 'dashB' : 'dashF'), out); break;
+      case 'rush': if (this.st < 9) copyPose(poseOf(W, 'dashF'), out); else runPose(st, this.walkPh, out); break;
+      case 'dash': lerpPose(st, poseOf(W, 'flip'), Math.min(1, Math.sin(clamp(this.st / FLIP_T, 0, 1) * PI) * 1.7), out); break;
       case 'guard': copyPose(poseOf(W, this.crouching ? 'guardLow' : 'guard'), out); break;
       case 'block': copyPose(poseOf(W, this.crouching ? 'guardLow' : 'guard'), out); out[1] -= 0.14; out[0] -= 1.5; break;
       case 'hit': copyPose(poseOf(W, this.hitVar ? 'hitGut' : 'hitHigh'), out); break;
@@ -2040,19 +2454,25 @@ class Fighter {
         else lerpPose(poseOf(W, 'crouch'), st, easeIO(u * 2 - 1), out);
         break;
       }
-      case 'land': copyPose(poseOf(W, 'land'), out); break;
+      case 'land': copyPose(poseOf(W, this.landSlam ? 'slam' : 'land'), out); break;
       case 'win': copyPose(poseOf(W, 'win'), out); out[0] += Math.abs(Math.sin(t * 0.14)) * 2.2; out[3] += Math.sin(t * 0.28) * 0.12; break;
       case 'attack': this.attackPose(out); break;
       default: copyPose(st, out); out[0] += Math.sin(t * 0.075) * 0.7; out[3] += Math.sin(t * 0.075 + 1) * 0.035; out[5] += Math.sin(t * 0.075 + 2) * 0.03; break;
     }
+    out[12] = this.bodyRot();
   }
   // after movement and hits: settle the pose, rig, ribbons and weapon trail
   post() {
     this.computePose(this.tp);
     const s = this.state;
-    const k = s === 'attack' ? 1 : (s === 'hit' || s === 'air' || s === 'block') ? 0.55 : s === 'guard' ? 0.6 : (s === 'down' || s === 'ko') ? 0.5 : s === 'crouch' ? 0.45 : 0.36;
+    const k = s === 'attack' ? 1 : (s === 'hit' || s === 'air' || s === 'block') ? 0.55 : (s === 'guard' || s === 'rush' || s === 'dash') ? 0.6 : (s === 'down' || s === 'ko') ? 0.5 : s === 'crouch' ? 0.45 : 0.36;
     const p = this.pose, tp = this.tp;
-    for (let i = 0; i < NP; i++) p[i] += (tp[i] - p[i]) * k;
+    for (let i = 0; i < 12; i++) p[i] += (tp[i] - p[i]) * k;
+    let dr = tp[12] - p[12];                                // a full turn is the same as none: take the short way round
+    dr -= TAU * Math.round(dr / TAU);
+    p[12] += dr * 0.7;
+    if (p[12] > PI) p[12] -= TAU; else if (p[12] < -PI) p[12] += TAU;
+    if (Math.abs(p[12]) < 0.004 && Math.abs(dr) < 0.004) p[12] = 0;
     const W = this.weapon, m = this.move;
     this.wopt.pull = (s === 'attack' && this.mkind === 'fire' && W.cls === 'bow' && this.shots === 0) ? easeOut(clamp(this.mf / Math.max(1, this.msu), 0, 1)) : 0;
     this.wopt.loaded = !W.fire || !W.fire.mag || this.ammo > 0;
@@ -2066,19 +2486,21 @@ class Fighter {
       if (d > tl) { T.x = ax + (dx / d) * tl; T.y = ay + (dy / d) * tl; }
     }
     const tr = this.trail;
-    if (s === 'attack' && this.mkind === 'melee' && m && !m.abs && W.len > 0 && this.mf >= this.msu - 2 && this.mf <= this.msu + m.ac + 1) {
+    if (s === 'attack' && this.mkind === 'melee' && m && !m.kick && !this.wopt.hide && W.len > 0 && this.mf >= this.msu - 2 && this.mf <= this.msu + m.ac + 1) {
       // sample the blade along its arc, so a fast swing leaves a curved smear instead of one flat wedge
       const hx = this.x + this.facing * R.hFx, hy = this.y + R.hFy, L = W.len * this.sc, pv = this.trailPrev;
       const fresh = !tr.length || !pv;
-      const n = fresh ? 1 : clamp(Math.ceil(Math.abs(R.wa - pv.wa) / 0.28), 1, 10);
+      let da = fresh ? 0 : R.wa - pv.wa;
+      if (!fresh && !m.spin && !m.rot) da -= TAU * Math.round(da / TAU);
+      const n = fresh ? 1 : clamp(Math.ceil(Math.abs(da) / 0.28), 1, 10);
       for (let k = 1; k <= n; k++) {
-        const u = k / n, a = fresh ? R.wa : pv.wa + (R.wa - pv.wa) * u;
+        const u = k / n, a = fresh ? R.wa : pv.wa + da * u;
         const px = fresh ? hx : pv.hx + (hx - pv.hx) * u, py = fresh ? hy : pv.hy + (hy - pv.hy) * u;
         const dx = Math.sin(a) * this.facing, dy = Math.cos(a);
         tr.push(px + dx * L, py + dy * L, px + dx * L * 0.4, py + dy * L * 0.4);
       }
       this.trailPrev = { hx, hy, wa: R.wa };
-      if (tr.length > 72) tr.splice(0, tr.length - 72);
+      if (tr.length > 96) tr.splice(0, tr.length - 96);
     } else if (tr.length) { tr.splice(0, Math.min(tr.length, 12)); if (!tr.length) this.trailPrev = null; }
     if (this.hpLag > this.hp) this.hpLag = Math.max(this.hp, this.hpLag - Math.max(0.3, (this.hpLag - this.hp) * 0.07)); else this.hpLag = this.hp;
   }
@@ -2086,30 +2508,35 @@ class Fighter {
 
 // ───────── projectiles ─────────
 class Proj {
-  constructor(w, owner, P, x, y, vx, vy, dmgMul) {
+  constructor(w, owner, P, x, y, vx, vy, dmgMul, nm) {
     this.w = w; this.owner = owner; this.P = P; this.x = x; this.y = y; this.px = x; this.py = y; this.vx = vx; this.vy = vy;
-    this.life = P.life || 150; this.age = 0; this.dead = false; this.dmgMul = dmgMul || 1;
+    this.life = P.life || 150; this.age = 0; this.dead = false; this.dmgMul = dmgMul || 1; this.nm = !!nm;      // nm: came from a special, builds no meter
     this.rot = 0; this.fuse = P.fuse || 0; this.bounces = 0; this.dir = vx < 0 ? -1 : 1;
+    this.sid = -1; this.ox = undefined;                      // volley id; where the first frame's sweep starts (behind the muzzle)
   }
   update() {
-    const P = this.P, w = this.w;
-    this.age++; this.px = this.x; this.py = this.y;
+    const P = this.P, w = this.w, k = P.kind;
+    this.age++; this.px = this.age === 1 && this.ox !== undefined ? this.ox : this.x; this.py = this.y;
     if (P.accel) this.vx += this.dir * P.accel * DT;
     this.vy += P.g * DT; this.x += this.vx * DT; this.y += this.vy * DT;
-    if (P.kind === 'dynamite') { this.rot += 0.32 * this.dir * (this.bounces ? 0.3 : 1); if (this.age % 3 === 0) w.fx.spark(this.x, this.y - 3, 0, 1, '#ffb41e', 90); if (this.age % 14 === 0) w.sfx('fuse'); }
-    else if (P.kind === 'rocket') { if (this.age % 2 === 0) w.fx.smoke(this.x - this.dir * 10, this.y, 1, 5, false); }
-    else if (P.kind === 'ball' && this.age % 2 === 0) w.fx.smoke(this.x, this.y, 1, 2.4, false);
+    if (k === 'dynamite' || k === 'bundle') { this.rot += 0.32 * this.dir * (this.bounces ? 0.3 : 1); if (this.age % 3 === 0) w.fx.spark(this.x, this.y - 3, 0, 1, '#ffb41e', 90); if (this.age % 14 === 0) w.sfx('fuse'); }
+    else if (k === 'frag' || k === 'bone') this.rot += (k === 'bone' ? 0.5 : 0.3) * this.dir * (this.bounces ? 0.3 : 1);
+    else if (k === 'rocket') { if (this.age % 2 === 0) w.fx.smoke(this.x - this.dir * 10, this.y, 1, 5, false); }
+    else if (k === 'ball') { if (this.age % 2 === 0) w.fx.smoke(this.x, this.y, 1, 2.4, false); }
+    else if (k === 'quake') { if (this.age % 2 === 0) { w.fx.dust(this.x, 0, 2, -this.dir); w.fx.spark(this.x, -6, 0, 1, '#ffffff', 220); } }
+    else if (k === 'wave') { if (this.age % 2 === 0) w.fx.spark(this.x - this.dir * 8, this.y + rand(-16, 16), -this.dir, 1, '#ffffff', 140); }
+    else if (k === 'firebolt') { if (this.age % 2 === 0) w.fx.spark(this.x - this.dir * 8, this.y, -this.dir, 1, '#ffb41e', 120); }
     const t = this.owner.opp;
     if (t && !this.dead && this.hits(t)) this.impact(t);
-    if (!this.dead && this.y >= 0) {
-      if (P.kind === 'dynamite') {
+    if (!this.dead && this.y >= 0 && !P.ground) {
+      if (P.bounce !== undefined) {
         this.y = 0;
         if (this.bounces < 3 && Math.abs(this.vy) > 60) { this.vy = -Math.abs(this.vy) * P.bounce; this.vx *= 0.55; this.bounces++; w.sfx('click'); if (P.shortFuse) this.fuse = Math.min(this.fuse, P.shortFuse); } else { this.vy = 0; this.vx *= 0.8; }
       } else if (P.expl) this.explode();
       else {
         this.dead = true;
-        if (P.kind === 'arrow' || P.kind === 'bolt') w.fx.stuck(this.x, 0, Math.atan2(this.vy, this.vx), P.kind === 'arrow' ? 15 : 9);
-        else if (P.kind === 'rock') w.fx.dust(this.x, 0, 3, 0);
+        if (k === 'arrow' || k === 'bolt' || k === 'javelin') w.fx.stuck(this.x, 0, Math.atan2(this.vy, this.vx), k === 'arrow' ? 15 : k === 'javelin' ? 32 : 9);
+        else if (k === 'rock' || k === 'boulder' || k === 'bone') w.fx.dust(this.x, 0, k === 'rock' ? 3 : 6, 0);
         else w.fx.spark(this.x, 0, 0, 3, '#fff3b0', 160);
       }
     }
@@ -2118,29 +2545,37 @@ class Proj {
   }
   hits(t) {
     if (t.inv > 0 || t.ko || t.state === 'down' || t.state === 'getup' || t.state === 'ko') return false;
-    const h = t.hurtBox();
-    return segBox(this.px, this.py, this.x, this.y, h.x0 - 3, h.y0 - 3, h.x1 + 3, h.y1 + 3);
+    const h = t.hurtBox(), r = this.P.rad || 3;
+    return segBox(this.px, this.py, this.x, this.y, h.x0 - r, h.y0 - r, h.x1 + r, h.y1 + r);
   }
   impact(t) {
     const P = this.P, o = this.owner;
     if (P.expl) return this.explode();
     let dmg = P.dmg * this.dmgMul * o.dmgMul * o.mods.ranged;
     if (P.falloff) dmg *= clamp(1.15 - (this.age / P.life) * 0.8, 0.35, 1);
-    const res = this.w.applyHit(o, t, { dmg, stun: P.stun, kbx: P.kbx, kby: P.launch ? -300 : 0, launch: !!P.launch, heavy: !!P.heavy, breaker: !!P.breaker, gb: P.gb || 1, dir: this.dir,
-      x: clamp(this.x, t.x - 10, t.x + 10), y: clamp(this.y, t.y - 80, t.y - 6), proj: true, blunt: P.kind === 'rock' });
+    let scale;
+    if (this.sid >= 0) {                                     // pellets of one shell, arrows of one volley, every round of a special
+      if (o.pScaleId !== this.sid) { o.pScaleId = this.sid; o.pScaleV = (t.state === 'hit' || t.state === 'air' || t.state === 'dizzy') ? Math.max(0.3, 1 - 0.12 * t.combo) : 1; }
+      scale = o.pScaleV;
+    }
+    // most of a shell at once puts them on the floor
+    let blast = false;
+    if (P.kind === 'pellet' && this.sid >= 0) { o.pHits = o.pHitSid === this.sid ? o.pHits + 1 : 1; o.pHitSid = this.sid; blast = o.pHits === 3; }
+    const res = this.w.applyHit(o, t, { dmg, scale, stun: P.stun, kbx: blast ? 280 : P.kbx, kby: blast ? -210 : P.kby || (P.launch ? -300 : 0), launch: blast || !!P.launch, heavy: blast || !!P.heavy, breaker: !!P.breaker, gb: P.gb || 1, dir: this.dir,
+      x: clamp(this.x, t.x - 10, t.x + 10), y: clamp(this.y, t.y - 80, t.y - 6), proj: true, blunt: P.kind === 'rock' || !!P.blunt, unblock: !!P.unblock, nometer: this.nm });
     if (res) this.dead = true;
   }
   explode() {
     this.dead = true;
     const E = this.P.expl, w = this.w, ex = this.x, ey = Math.min(this.y, -6);
     const R = E.r + 14;
-    w.fx.boom(ex, ey, E.r); w.sfx('boom'); w.addShake(16); w.hitstop = Math.max(w.hitstop, 5);
+    w.fx.boom(ex, ey, E.r); w.sfx('boom'); w.addShake(E.r > 100 ? 20 : 16); w.hitstop = Math.max(w.hitstop, 5);
     for (const f of w.fighters) {
       const cx = f.x, cy = f.y - 42 * f.sc, d = Math.hypot(cx - ex, cy - ey);
       if (d > R) continue;
       const k = 1 - 0.6 * clamp(d / R, 0, 1), self = f === this.owner;
       const dmg = E.dmg * k * this.dmgMul * this.owner.dmgMul * (self ? 0.3 : this.owner.mods.ranged);
-      w.applyHit(this.owner, f, { dmg, stun: 22, kbx: 260 * k + 80, kby: -330 - 140 * k, launch: true, heavy: true, dir: cx >= ex ? 1 : -1, x: cx, y: cy, expl: true });
+      w.applyHit(this.owner, f, { dmg, stun: 22, kbx: 260 * k + 80, kby: -330 - 140 * k, launch: true, heavy: true, dir: cx >= ex ? 1 : -1, x: cx, y: cy, expl: true, nometer: this.nm });
     }
   }
   draw() {
@@ -2148,13 +2583,32 @@ class Proj {
     g.save(); g.translate(this.x, this.y); g.lineCap = 'round';
     switch (P.kind) {
       case 'rock': g.fillStyle = INK; disc(0, 0, 4.4); g.fillStyle = '#c9ccd3'; disc(0, 0, 3.2); break;
+      case 'boulder': g.fillStyle = INK; disc(0, 0, 10); g.fillStyle = '#c9ccd3'; disc(0, 0, 8.4); g.fillStyle = '#9da1ab'; disc(2.4, 2, 3.2); disc(-3, -2.4, 1.8); break;
       case 'arrow': g.rotate(a); inkLine(-18, 0, 0, 0, 1.7, '#f1e2c0', INK, 1.8); inkPoly([-1, -2.8, 6, 0, -1, 2.8], '#cfd6dc', INK, 1.6); inkLine(-18, 0, -14, 0, 3.4, RED, null); break;
       case 'bolt': g.rotate(a); inkLine(-11, 0, 0, 0, 2, '#f1e2c0', INK, 1.8); inkPoly([-1, -2.6, 5, 0, -1, 2.6], '#cfd6dc', INK, 1.6); break;
+      case 'firebolt': g.rotate(a); inkLine(-11, 0, 0, 0, 2, '#f1e2c0', INK, 1.8); g.fillStyle = '#ff9d1e'; disc(3, 0, 4.6 + Math.random() * 1.4); g.fillStyle = '#fff3b0'; disc(3, 0, 2.4); break;
       case 'ball': g.fillStyle = '#ffffff'; disc(0, 0, 3.6); g.fillStyle = INK; disc(0, 0, 2.5); break;
       case 'bullet': g.rotate(a); g.strokeStyle = 'rgba(255,243,176,0.35)'; g.lineWidth = 1.4; seg(-46, 0, 0, 0); g.strokeStyle = '#fff3b0'; g.lineWidth = 2.4; seg(-18, 0, 0, 0); g.strokeStyle = '#ffffff'; g.lineWidth = 1.2; seg(-8, 0, 0, 0); break;
+      case 'slug': g.rotate(a); g.strokeStyle = 'rgba(255,243,176,0.4)'; g.lineWidth = 2.4; seg(-60, 0, 0, 0); g.strokeStyle = '#fff3b0'; g.lineWidth = 4.4; seg(-20, 0, 0, 0); g.strokeStyle = '#ffffff'; g.lineWidth = 2; seg(-9, 0, 0, 0); break;
       case 'pellet': g.rotate(a); g.strokeStyle = '#fff3b0'; g.lineWidth = 1.8; seg(-10, 0, 0, 0); break;
-      case 'tracer': g.rotate(a); g.strokeStyle = 'rgba(255,255,255,0.4)'; g.lineWidth = 2; seg(-170, 0, 0, 0); g.strokeStyle = '#ffffff'; g.lineWidth = 3; seg(-60, 0, 0, 0); break;
+      case 'tracer': g.rotate(a); g.strokeStyle = P.unblock ? rgba(RED, 0.5) : 'rgba(255,255,255,0.4)'; g.lineWidth = 2; seg(-170, 0, 0, 0); g.strokeStyle = '#ffffff'; g.lineWidth = 3; seg(-60, 0, 0, 0); break;
       case 'dynamite': g.rotate(this.rot); g.translate(-6, 0); WD.dynamite(); break;
+      case 'bundle': g.rotate(this.rot); for (let i = -1; i <= 1; i++) { g.save(); g.translate(-6, i * 5); WD.dynamite(); g.restore(); } break;
+      case 'frag': g.rotate(this.rot); g.fillStyle = INK; disc(0, 0, 5.6); g.fillStyle = '#6f8f3a'; disc(0, 0, 4.2); g.fillStyle = '#c9ccd3'; g.fillRect(-1.6, -7.4, 3.2, 3); break;
+      case 'bone': g.rotate(this.rot); g.translate(-14, 0); WD.club(); break;
+      case 'javelin': g.rotate(a); g.translate(-58, 0); WD.spear(); break;
+      case 'wave': {
+        g.scale(this.dir, 1); g.globalAlpha = Math.min(1, this.life / 8);
+        g.beginPath(); g.moveTo(-8, -25); g.quadraticCurveTo(24, 0, -8, 25); g.quadraticCurveTo(7, 0, -8, -25); g.closePath();
+        g.strokeStyle = INK; g.lineWidth = 3; g.lineJoin = 'round'; g.stroke(); g.fillStyle = '#ffffff'; g.fill();
+        g.globalAlpha = 1; break;
+      }
+      case 'quake': {
+        g.scale(this.dir, 1); g.globalAlpha = Math.min(1, this.life / 10);
+        polyPath([-28, 5, -12, -9, -5, -1, 5, -24, 11, -6, 21, -15, 27, 5]);
+        g.strokeStyle = INK; g.lineWidth = 3; g.lineJoin = 'round'; g.stroke(); g.fillStyle = '#ffffff'; g.fill();
+        g.globalAlpha = 1; break;
+      }
       case 'rocket': {
         g.rotate(a);
         const fl = 8 + Math.random() * 8;
@@ -2175,7 +2629,7 @@ class World {
     this.era = o.era || 0; this.audible = !!o.audible;
     this.fighters = []; this.projs = []; this.fx = new FX();
     this.frame = 0; this.hitstop = 0; this.shake = 0; this.shx = 0; this.shy = 0;
-    this.slow = 0; this.slowAcc = 0; this.dim = 0; this.superBy = null; this.superT = 0;
+    this.slow = 0; this.slowAcc = 0; this.dim = 0; this.superBy = null; this.superT = 0; this.punch = 0;
     this.cam = { x: AW / 2, z: 1, gy: 252 };
     this.ko = null;                                       // { loser, winner, frame } once someone drops
     this.seed = o.seed || 1;
@@ -2189,9 +2643,15 @@ class World {
     return f;
   }
   clearRound() { this.projs.length = 0; this.ko = null; this.slow = 0; this.hitstop = 0; this.fx.ghosts.length = 0; this.dim = 0; this.superT = 0; }
-  superFreeze(f) {
+  superFreeze(f, name) {
     this.hitstop = Math.max(this.hitstop, 24); this.superBy = f; this.superT = 40;
     this.sfx('super_'); this.fx.ring(f.x, f.y - 46 * f.sc, 10, 120, 22, RED, 5); this.fx.flash = Math.max(this.fx.flash, 0.35);
+    if (name) this.fx.text(f.x, f.y - 108 * f.sc, name, RED, 13, 80);
+  }
+  specialFlash(f, name) {
+    this.hitstop = Math.max(this.hitstop, 9);
+    this.sfx('special'); this.fx.ring(f.x, f.y - 46 * f.sc, 8, 74, 14, '#ffffff', 4);
+    if (name) this.fx.text(f.x, f.y - 106 * f.sc, name, PAPER, 10.5, 64);
   }
   onKO(def, att) {
     if (!this.ko) this.ko = { loser: def, winner: def.opp, frame: this.frame, double: false };
@@ -2206,10 +2666,10 @@ class World {
     if ((def.state === 'guard' || def.state === 'block') && h.dir === -def.facing && !h.unblock) {
       const chip = h.dmg * DMG * 0.14 * def.mods.chip;
       def.hp = Math.max(1, def.hp - chip); def.taken += chip; att.dealt += chip;
-      def.guardG -= (h.dmg * 2.1 * (h.gb || 1)) / def.mods.guard; def.guardDelay = 50;
+      def.guardG -= (h.dmg * 1.6 * (h.gb || 1)) / def.mods.guard; def.guardDelay = 50;
       def.vx = (h.dir * (50 + (h.kbx || 100) * 0.3)) / def.mods.weight;
-      att.meter = Math.min(100, att.meter + h.dmg * 0.3 * att.mods.meter);
-      def.meter = Math.min(100, def.meter + h.dmg * 0.25 * def.mods.meter);
+      if (!h.nometer) att.gain(h.dmg * 0.45);
+      def.gain(h.dmg * 0.35);
       const low = def.crouching;
       if (def.guardG <= 0) {
         def.guardG = 0; def.setState('dizzy'); def.stun = 84;
@@ -2220,53 +2680,90 @@ class World {
         this.sfx('block'); this.hitstop = Math.max(this.hitstop, h.heavy ? 4 : 2);
       }
       fx.block(h.x, h.y, h.dir);
+      def.count('block');
       return 2;
     }
     const inCombo = def.state === 'hit' || def.state === 'air' || def.state === 'dizzy';
+    if (def.state === 'dizzy') def.guardG = Math.max(def.guardG, 60);       // being hit out of a broken guard gives most of it back
+    // caught running in by a real hit (not one round of a spray): it staggers
+    const counter = (def.state === 'rush' || (def.state === 'walk' && def.running)) && att !== def && h.dmg >= 6;
     def.combo = inCombo ? def.combo + 1 : 1;
-    const dmg = h.dmg * DMG * (h.flat ? 1 : Math.max(0.45, 1 - 0.1 * (def.combo - 1)));
+    // every hit in a combo does a little less; a multi-hit move takes its scale once, from where it started
+    const dmg = h.dmg * DMG * (h.scale !== undefined ? h.scale : Math.max(0.3, 1 - 0.12 * (def.combo - 1)));
     const heavy = !!h.heavy, self = att === def;
     def.hp -= dmg; def.flash = 4; def.guardDelay = 40; def.taken += dmg;
     if (!self) {
       att.dealt += dmg; att.comboShow = def.combo; att.comboT = 75; if (def.combo > att.maxCombo) att.maxCombo = def.combo;
-      att.meter = Math.min(100, att.meter + dmg * 0.9 * att.mods.meter);
+      if (!h.nometer) att.gain(dmg * 1.5);
     }
-    def.meter = Math.min(100, def.meter + dmg * 0.55 * def.mods.meter);
+    def.gain(dmg * 0.9);
     fx.hit(h.x, h.y, h.dir, heavy, defColors(def.def).col);
     if (this.audible && def.isPlayer && save.shake && navigator.vibrate) { try { navigator.vibrate(heavy ? 28 : 10); } catch (e) { /* not supported */ } }
     this.sfx(h.blunt || h.expl ? 'hit' : 'slice', heavy ? 1 : 0);
     this.hitstop = Math.max(this.hitstop, heavy ? 7 : h.proj ? 2 : 4);
     this.addShake(heavy ? 8 : 3);
+    if (heavy) this.punch = 1;
     if (def.hp <= 0) {
       def.hp = 0; def.ko = true; def.setState('air');
       def.vx = h.dir * Math.max(240, (h.kbx || 0) * 0.9); def.vy = Math.min(-380, h.kby || -380); def.y = Math.min(def.y, -0.5); def.bounced = false;
       this.onKO(def, att);
       return 1;
     }
-    if (def.armor && !h.launch && !heavy && (def.armor !== 'proj' || (h.proj && !h.breaker))) return 1;   // armoured moves power through light hits
-    const airborne = !def.grounded;
-    if (h.launch || airborne || (def.combo >= 6 && !h.flat)) {
-      def.juggle = def.state === 'air' ? def.juggle + 1 : 0;
+    if (def.armor && !h.launch && !heavy && (def.armor !== 'proj' || (h.proj && !h.breaker)) && !def.armorSpent) {      // armoured moves power through light hits
+      const dm = def.move;
+      if (dm && !dm.sup && !dm.special && def.armor !== 'proj') def.armorSpent = true;      // an ordinary swing only shrugs off one
+      return 1;
+    }
+    const airborne = !def.grounded, wasAir = def.state === 'air';
+    if (h.launch || airborne || (def.combo >= 7 && !h.flat)) {
+      if (wasAir) { if (h.mid === undefined || h.mid !== def.jugMove) def.juggle++; } else { def.juggle = 0; def.wallHit = false; }
+      def.jugMove = h.mid === undefined ? -1 : h.mid;
       def.softDown = !h.launch && !heavy;
       def.setState('air');
-      def.vx = (h.dir * Math.max(150, h.kbx || 150)) / def.mods.weight; def.vy = h.kby || (airborne ? -260 : -300);
+      let vx, vy;
+      if (!wasAir) {                                        // off the ground (or out of a jump)
+        vx = h.launch ? (h.kbx || 150) : Math.max(150, h.kbx || 150);
+        vy = h.kby || (airborne ? -260 : -300);
+        if (h.launch && vy <= -400 && !self) { this.sfx('launchUp'); if (att.isPlayer) att.count('launch'); }
+      }
+      else if (h.fin || h.expl || (h.kbx || 0) > 250) { vx = h.kbx || 150; vy = h.kby || -260; }       // blown clear
+      else if (h.spike) { vx = 110; vy = 600; def.spiked = true; fx.ring(h.x, h.y, 6, 40, 10, '#ffffff', 3); }   // driven into the floor
+      else if (h.relaunch) { vx = 40; vy = -Math.max(170, 350 - 45 * def.juggle); }                       // launched again, lower each time
+      else if (heavy) { vx = Math.max(280, h.kbx || 0); vy = -240; }                                       // a heavy blow on a body in the air knocks it clear: big weapons do not juggle
+      else { vx = clamp((h.kbx || 100) * 0.6, 40, 90); vy = -Math.max(120, 250 - 35 * def.juggle); }       // a juggle hit pops them back up a little
+      def.vx = (h.dir * vx) / def.mods.weight; def.vy = vy;
       def.y = Math.min(def.y, -0.5); def.bounced = false;
     } else {
       def.hitVar = h.y > def.y - 46 * def.sc ? 1 : 0;
       def.setState('hit'); def.stun = h.stun || 15; def.vx = (h.dir * (h.kbx || 110)) / def.mods.weight;
+      if (counter) { def.stun = Math.max(def.stun, 16) + 10; def.vx = (h.dir * Math.max(h.kbx || 0, 260)) / def.mods.weight; fx.text(def.x, def.y - 96 * def.sc, 'Counter', PAPER, 8.5, 40); }
     }
     return 1;
   }
   meleeHit(att, def, box) {
     const m = box.m, f = box.f;
     const last = !!m.multi && f + m.multi >= att.msu + m.ac, fin = last ? m.fin : null;
+    let scale;
+    if (m.flat) {
+      if (att.scaleId !== att.moveId) {
+        att.scaleId = att.moveId;
+        att.scaleV = (def.state === 'hit' || def.state === 'air' || def.state === 'dizzy') ? Math.max(0.5, 1 - 0.1 * def.combo) : 1;
+      }
+      scale = att.scaleV;
+    }
     const res = this.applyHit(att, def, {
       dmg: m.dmg * att.dmgMul * att.mods.melee, stun: m.stun, kbx: fin ? fin.kbx : m.kbx, kby: fin ? fin.kby : m.kby,
-      launch: !!m.launch || !!fin, gb: m.gb, heavy: !!m.heavy && (!m.multi || last), blunt: !!m.blunt, flat: !!m.flat, dir: att.facing,
+      launch: !!m.launch || !!fin, fin: !!fin, gb: m.gb, heavy: !!m.heavy && (!m.multi || last), blunt: !!m.blunt, flat: !!m.flat, scale, dir: att.facing,
+      spike: !!m.spike, relaunch: !!m.link && !!m.launch, mid: att.moveId, nometer: !!(m.special || m.sup),
       x: clamp(att.x + att.facing * m.r1 * att.sc * 0.85, def.x - 10, def.x + 10),
       y: def.y - (m.low ? 12 : def.crouching ? 36 : 58) * def.sc + rand(-6, 6)
     });
-    if (res) { att.hitDone = true; att.lastHitF = f; }
+    if (res) {
+      // blocked: a rush strike, a launcher, a knock-away or the last hit of a string leaves you open for a moment
+      const ch = att.weapon.chain, last2 = !!ch && att.chainIdx === ch.length - 1 && ch[att.chainIdx] === m;
+      if (res === 2 && !att.touched && (m.link || m.ender || last2)) att.mrc += m.link ? 9 : 7;
+      att.hitDone = true; att.lastHitF = f; att.touched = res === 1 ? 1 : (att.touched || 2);
+    }
   }
   separate(a, b) {
     if (a.ko || b.ko) return;
@@ -2283,12 +2780,14 @@ class World {
   }
   step(in1, in2) {
     this.frame++;
+    const a = this.fighters[0], b = this.fighters[1];
+    if (a) a.feed(in1);
+    if (b) b.feed(in2);
     this.fx.update();
     if (this.superT > 0) this.superT--;
     this.dim += ((this.superT > 0 ? 1 : 0) - this.dim) * 0.25;
     if (this.hitstop > 0) { this.hitstop--; this.updateCam(); return; }
     if (this.slow > 0) { this.slow--; this.slowAcc += 0.34; if (this.slowAcc < 1) { this.updateCam(); return; } this.slowAcc -= 1; }
-    const a = this.fighters[0], b = this.fighters[1];
     if (a) a.update(in1);
     if (b) b.update(in2);
     if (a && b) {
@@ -2311,7 +2810,8 @@ class World {
     if (!a) return;
     const mid = b ? (a.x + b.x) / 2 : a.x, dist = b ? Math.abs(a.x - b.x) : 0;
     const M = 175 + Math.max(view.sl, view.sr) * 0.6;
-    const zT = clamp(view.W / (dist + 2 * M), ZMIN, ZMAX);
+    const zT = clamp(view.W / (dist + 2 * M), ZMIN, ZMAX) * (1 + this.punch * 0.05);
+    this.punch *= 0.88;
     c.z += (zT - c.z) * 0.07;
     const half = view.W / 2 / c.z, lo = half - 130, hi = AW - half + 130;
     const xT = lo > hi ? AW / 2 : clamp(mid, lo, hi);
@@ -2391,7 +2891,11 @@ class AI {
     o = o || {};
     this.f = f; this.lv = lv; this.inp = blankInput();
     this.cool = 24 + randi(0, 12); this.plan = 'wait';
-    this.resp = null; this.seenId = -1; this.burst = 0; this.crouchShot = false; this.airDone = true; this.fleeDir = 0;
+    this.resp = null; this.seenId = -1; this.seenRush = -1; this.burst = 0; this.crouchShot = false; this.airDone = true; this.fleeDir = 0;
+    this.route = 'string'; this.routeAt = 0; this.didMove = -1;       // what the next combo is meant to end in, and after which hit
+    this.press = 0; this.pressAt = 0; this.wasDown = false; this.wasStun = false;       // how hard it is being leaned on; whether it was just floored or staggered
+    this.shots = 0; this.shotsAt = 0; this.cover = 0;                  // how much is being fired at it; until when it keeps its head down
+    this.punishId = -1;                                                // the last move of theirs it weighed up as an opening
     this.base = f.baseWeapon; this.alt = o.alt || null; this.phases = o.phases || null;
   }
   reach() { const W = this.f.weapon; return W.chain ? (W.chain[0].r1 - 9) * this.f.sc : 42; }
@@ -2410,38 +2914,79 @@ class AI {
       this.cool = 12; this.plan = 'wait';
     }
   }
+  // better fighters use more of the move list: launchers and knock-aways instead of the plain string
+  pickRoute() {
+    const sk = this.lv.sk, r = Math.random(), W = this.f.weapon;
+    this.route = r < sk * 0.42 ? 'launch' : r < sk * 0.54 + 0.1 ? 'smash' : r < sk * 0.54 + 0.17 ? 'sweep' : 'string';
+    this.routeAt = Math.min(Math.random() < 0.5 ? 0 : 1, W.chain ? W.chain.length - 1 : 0);
+  }
 
   // notice what the opponent is doing and, after a reaction delay, maybe answer it
   perceive(d, to) {
     const f = this.f, o = f.opp, L = this.lv, w = f.w, now = w.frame;
+    const guarding = f.state === 'guard' || f.state === 'block';
+    const busy = f.state === 'attack' || f.state === 'rush' || f.state === 'dash';
+    if (this.seenRush < 0) this.seenRush = o.rushId;
+    if (o.rushId !== this.seenRush) {                       // they are rushing in
+      this.seenRush = o.rushId;
+      if (o.state === 'rush' && d < 270 && !busy) {
+        // a rush is the easiest thing in the game to see coming, so even early opponents deal with it some of the time
+        const delay = Math.max(1, Math.min(L.react, 17) + randi(-2, 3)), r = Math.random(), see = Math.min(0.94, 0.26 + L.block * 1.5);
+        const hold = { type: !guarding && Math.random() < L.dodge * 0.35 && f.dashCd <= 0 ? 'back' : 'guard', at: now + (guarding ? 0 : delay), until: now + 46 };
+        if (guarding) this.resp = hold;
+        else if (r < see * (0.25 + L.punish * 0.45) && !f.weapon.fire) this.resp = { type: 'poke', at: now + delay, until: now + 34 };       // put a weapon in their way
+        else if (r < see * (0.3 + L.punish * 0.5) && f.weapon.fire && d > 90 && (!f.weapon.fire.mag || f.ammo > 0)) this.resp = { type: 'fire', at: now + Math.max(1, delay - 6), until: now + 30 };       // or a bullet
+        else if (r < see) this.resp = hold;
+      }
+    }
     if (o.state === 'attack' && o.move && o.moveId !== this.seenId) {
       this.seenId = o.moveId;
-      const m = o.move, delay = Math.max(1, L.react + randi(-2, 3));
-      const guarding = f.state === 'guard' || f.state === 'block';
-      if (o.mkind === 'melee') {
-        const reach = m.r1 * o.sc + (m.lunge ? m.lunge * 0.3 : 0) + 28;
-        if (d < reach && f.state !== 'attack') {
-          const p = guarding ? Math.max(L.block, 0.85) : L.block * (m.sup ? 1.25 : 1);
+      const m = o.move, delay = Math.max(1, L.react + randi(-2, 3)), gd = Math.max(1, delay - 4);      // raising a guard is the quickest reaction there is
+      const thrown = o.mkind === 'melee' && m.spawn ? PROJ[m.spawn.proj] : null;
+      if (o.mkind === 'melee' && !thrown) {
+        const far = m.leap ? 150 : m.hop ? 150 : m.slide ? 70 : 28;
+        const reach = m.r1 * o.sc + (m.lunge ? m.lunge * 0.3 : 0) + far;
+        if (d < reach + 40) { if (now - this.pressAt > 170) this.press = 0; this.press = Math.min(5, this.press + 1); this.pressAt = now; }
+        if (d < reach && !busy) {
+          // someone who keeps swinging gets read: each attack in a row makes the next block likelier, more so for better fighters
+          const lean = 1 + 0.4 * Math.max(0, this.press - 1) * (0.3 + L.sk);
+          const mid = f.state === 'block' || (this.resp && this.resp.type === 'guard' && this.resp.took);       // already blocking this string
+          // a swing slow enough to react to gets blocked far more often than one that has to be guessed
+          const seen = o.msu >= gd + 2 || m.leap || m.hop ? 2.3 : 1;
+          const p = mid ? 0.97 : guarding ? Math.max(L.block, 0.85) : Math.min(0.94, L.block * lean * seen * (m.sup || m.special ? 1.3 : 1));
           if (Math.random() < p) {
-            const back = !guarding && L.dodge > 0.2 && Math.random() < 0.16 && f.dashCd <= 0;
-            this.resp = { type: back ? 'back' : 'guard', at: now + (guarding ? 0 : delay), until: now + o.msu + m.ac + 7 };
+            // a blow that would smash straight through the guard is one to get away from, not to block
+            const breaks = m.dmg * 1.6 * (m.gb || 1) * (m.multi ? Math.floor(m.ac / m.multi) : 1) / f.mods.guard >= f.guardG - 6 && !mid;
+            const back = (breaks || (!guarding && L.dodge > 0.2 && Math.random() < (m.leap || m.pound ? 0.38 : 0.16))) && f.dashCd <= 0;
+            this.resp = { type: back ? 'back' : breaks ? 'jumpback' : 'guard', at: now + (guarding && !back ? 0 : gd), until: now + o.msu + m.ac + (m.leap || m.hop ? 24 : 9), took: mid };
           }
         }
-      } else if (Math.random() < L.dodge && f.state !== 'attack') {
-        const P = PROJ[m.proj], r = Math.random();
+      } else {
+        const P = thrown || PROJ[m.proj], r = Math.random();
+        const lands = !!(m.rain || m.aimAt);                                         // it comes down where I am standing
+        const flat = P.g === 0 && P.kind !== 'pellet' && P.kind !== 'wave' && !P.ground && !o.crouching && !m.sweep && !m.multiA;      // chest-high shots can be ducked
+        // someone who just keeps shooting gets read too: after a couple of rounds a gunner drops to a crouch and fires back from there
+        if (now - this.shotsAt > 220) this.shots = 0;
+        this.shots = Math.min(6, this.shots + 1); this.shotsAt = now;
+        if (flat && f.weapon.fire && this.shots >= 2 && Math.random() < Math.min(0.9, 0.08 + L.dodge * 2.2)) this.cover = now + 150;
+        const tele = o.msu >= gd + 3 ? 2.2 : 1;                                       // a shot with a long wind-up (or a laser on it) is easy to see coming
+        if (Math.random() < Math.min(0.93, L.dodge * tele * (1 + 0.35 * (this.shots - 1))) && !busy) {
         let type;
-        const flat = P.g === 0 && P.kind !== 'pellet' && !o.crouching;                 // chest-high shots can be ducked
-        if (P.expl) type = d < 240 ? 'flee' : 'jump';
-        else if (flat && !f.weapon.fire && d > 120 && f.dashCd <= 0 && r < 0.2 + L.sk * 0.3) type = 'under';   // dash in beneath the shot
-        else if (flat && r < 0.6) type = 'duck';
+        if (lands) type = 'flee';
+        else if (P.expl) type = d < 240 ? 'flee' : 'jump';
+        else if (P.ground) type = 'jump';                                           // a shockwave along the floor
+        else if (flat && !f.weapon.fire && d > 120 && f.rushCd <= 0 && r < 0.12 + L.sk * 0.2) type = 'under';   // rush in beneath the shot
+        else if (flat && !f.weapon.fire && d > 60 && d < 200 && r < 0.3 + L.sk * 0.3) type = 'slide';
+        else if (flat && (P.unblock || r < 0.6)) type = 'duck';
         else type = r < 0.8 ? 'guard' : 'jump';
-        this.resp = { type, at: now + delay, until: now + delay + o.msu + (m.auto || m.burst ? 46 : 20), fwd: Math.random() < 0.6 };
-        this.fleeDir = -to;
+        this.resp = { type, at: now + (type === 'guard' || type === 'duck' ? gd : delay), until: now + delay + o.msu + (m.auto || m.burst ? 30 : lands ? 64 : 20), fwd: Math.random() < 0.6 };
+        this.fleeDir = lands && !f.weapon.fire ? to : -to;
+        }
       }
     }
     if (!this.resp && L.dodge > 0.05) {
       for (const p of w.projs) {
-        if (p.dead || !p.P.expl || p.P.kind !== 'dynamite') continue;
+        if (p.dead || !p.P.expl || p.P.bounce === undefined) continue;
         if (p.fuse < 50 && Math.abs(p.x - f.x) < p.P.expl.r + 34 && Math.random() < L.dodge * 0.2 + 0.03) {
           this.resp = { type: 'flee', at: now + Math.max(1, L.react >> 1), until: now + 40 };
           this.fleeDir = f.x >= p.x ? 1 : -1;
@@ -2452,52 +2997,154 @@ class AI {
   }
 
   think() {
-    const f = this.f, o = f.opp, inp = this.inp, w = f.w;
-    inp.l = inp.r = inp.u = inp.d = inp.atk = inp.guard = inp.atkP = inp.kickP = inp.dashP = inp.supP = false;
-    if (!o || f.ko || o.ko) return inp;
+    const f = this.f, o = f.opp, inp = this.inp, w = f.w, L = this.lv;
+    inp.l = inp.r = inp.u = inp.d = inp.run = inp.atk = inp.guard = inp.atkP = inp.kickP = inp.sp1P = inp.sp2P = inp.sp3P = false; inp.sw = 0;
+    if (!o || f.ko || o.ko || w.hitstop > 0) return inp;      // nothing moves while the world is frozen on a hit
     const dx = o.x - f.x, d = Math.abs(dx), to = dx >= 0 ? 1 : -1, now = w.frame;
     this.weaponPhase();
     this.perceive(d, to);
+    if (f.state === 'down' || f.state === 'getup') this.wasDown = true;
+    else if (this.wasDown) { this.wasDown = false; if (f.canAct()) this.wakeUp(d, to, now, 1); }
+    if (f.state === 'hit') this.wasStun = true;
+    else if (this.wasStun) { this.wasStun = false; if (f.canAct()) this.wakeUp(d, to, now, 0.8); }
+    if (this.punish(inp, d, to)) return inp;
     const r = this.resp;
     if (r && now > r.until) this.resp = null;
     else if (r && now >= r.at) {
-      if (r.type === 'guard') { inp.guard = true; return inp; }
-      if (r.type === 'duck') { if (f.canAct()) inp.d = true; return inp; }
-      if (r.type === 'jump') {
+      if (r.type === 'guard') {
+        if (f.state === 'block') { r.took = true; r.until = Math.max(r.until, now + 3); }       // stay with it until the stagger of the block is over
+        const om = o.state === 'attack' && o.mkind === 'melee' ? o.move : null;
+        // a guard that is nearly spent is no place to stay: get out rather than have it broken
+        if (f.guardG < 28 && f.state !== 'block' && f.dashCd <= 0) { inp.sw = to > 0 ? 2 : 1; this.resp = null; return inp; }
+        if (r.took && f.state !== 'block' && om && o.mf > o.msu + om.ac + 5) this.resp = null;       // it is over
+        else { inp.guard = true; return inp; }
+      }
+      else if (r.type === 'duck') { if (f.canAct()) inp.d = true; return inp; }
+      else if (r.type === 'jump') {
         if (f.canAct()) { inp.u = true; if (r.fwd) inp[to > 0 ? 'r' : 'l'] = true; }
         if (f.state === 'jump') { this.resp = null; this.airDone = false; }
         return inp;
       }
-      if (r.type === 'under') { if (f.canAct()) { inp.dashP = true; inp[to > 0 ? 'r' : 'l'] = true; this.plan = 'strike'; this.cool = 14; } this.resp = null; return inp; }
-      if (r.type === 'back') { if (f.canAct() || f.state === 'guard') { inp.dashP = true; inp[to > 0 ? 'l' : 'r'] = true; } this.resp = null; return inp; }
-      if (r.type === 'flee') {
+      else if (r.type === 'under') { if (f.canAct()) { inp.sw = to > 0 ? 1 : 2; this.pickRoute(); this.plan = 'wait'; this.cool = 16; } this.resp = null; return inp; }
+      else if (r.type === 'back') { if (f.canAct() || f.state === 'guard') inp.sw = to > 0 ? 2 : 1; this.resp = null; return inp; }
+      else if (r.type === 'jumpback') {                      // hop backwards out of reach; held until actually airborne (a guard has to drop first)
+        if (f.state === 'jump') { this.resp = null; this.airDone = true; this.plan = 'jumping'; this.cool = 30; }
+        else if (f.canAct()) { inp.u = true; inp[to > 0 ? 'l' : 'r'] = true; }
+        return inp;
+      }
+      else if (r.type === 'slide') { if (f.canAct()) { inp.sw = 4; this.plan = 'wait'; this.cool = 20; } this.resp = null; return inp; }
+      else if (r.type === 'fire') { if (f.canAct()) { inp.atkP = true; inp.atk = true; this.burst = 4; } this.resp = null; return inp; }
+      else if (r.type === 'poke') {
+        if (!f.canAct()) this.resp = null;
+        else if (d <= this.reach() + 34) { inp.atkP = true; this.route = 'string'; this.resp = null; }
+        return inp;
+      }
+      else if (r.type === 'flee') {
         let dir = this.fleeDir;
         if ((dir < 0 && f.x < XMIN + 40) || (dir > 0 && f.x > XMAX - 40)) { dir = -dir; if (f.canAct()) inp.u = true; }
-        inp[dir > 0 ? 'r' : 'l'] = true;
-        if (f.canAct() && f.dashCd <= 0 && now === r.at) inp.dashP = true;
+        inp[dir > 0 ? 'r' : 'l'] = true; inp.run = true;
+        if (f.canAct() && now === r.at) inp.sw = dir > 0 ? 1 : 2;
         return inp;
       }
     }
-    if (f.state === 'attack') { this.duringAttack(inp); return inp; }
+    if (f.state === 'attack') { this.duringAttack(inp, d, to); return inp; }
     if (f.state === 'jump') { this.inAir(inp, d, to); return inp; }
+    if (f.state === 'land') { if (f.landLink && f.st === 2 && Math.random() < L.combo + 0.1) { inp.atkP = true; this.pickRoute(); } return inp; }
     if (!f.canAct() && f.state !== 'guard') return inp;
     if (--this.cool <= 0) this.decide(d, to);
     this.execute(inp, d, to);
     return inp;
   }
 
-  duringAttack(inp) {
-    const f = this.f, L = this.lv, m = f.move;
+  // How many frames they are still stuck for, if what they just did has left them open; 0 if not (or not for sure).
+  opening() {
+    const o = this.f.opp;
+    if (o.state === 'land') return o.landLink ? 0 : o.landLag - o.st;
+    if (o.state !== 'attack' || !o.move) return 0;
+    const m = o.move;
+    if (o.mkind === 'melee') {
+      const endA = o.msu + m.ac;
+      if (o.mf <= endA || o.airMove) return 0;
+      const ch = o.weapon.chain, more = !!ch && o.chainIdx >= 0 && ch[o.chainIdx] === m && o.chainIdx + 1 < ch.length;
+      if ((more || (m.link && o.touched === 1)) && o.mf < endA + 5) return 0;        // they may still flow into the next hit
+      return endA + o.mrc - o.mf;
+    }
+    if (o.shots > 0 && !m.burst && !m.auto && m.refire >= 25) return o.mrc - (o.mf - o.shotAt);       // a slow gun that has just fired
+    return 0;
+  }
+  // act on an opening: hit them with whatever will get there before they recover
+  punish(inp, d, to) {
+    const f = this.f, o = f.opp, L = this.lv, W = f.weapon;
+    if (o.moveId === this.punishId || !(f.canAct() || f.state === 'guard')) return false;
+    const left = this.opening();
+    if (left <= 0) return false;
+    this.punishId = o.moveId;
+    if (Math.random() > (o.touched === 2 ? 0.1 + L.sk * 0.3 : 0.06 + L.sk * 0.08) + L.punish) return false;
+    const gunOk = !!W.fire && (!W.fire.mag || f.ammo > 0), reach = this.reach();
+    let plan = null;
+    if (gunOk) { if (left >= Math.round(W.fire.su * f.mods.draw) + 1 + Math.ceil(d / 26) && !PROJ[W.fire.proj].expl) plan = 'shoot'; else if (d < 56 && left >= 8) plan = 'kick'; }
+    else if (W.chain && d <= reach + 22 && left >= W.chain[0].su) plan = 'strike';
+    else if (W.chain && f.rushCd <= 0 && left >= (d - reach) / 9 + 8) plan = 'rush';
+    else if (W.fire && d < 56 && left >= 8) plan = 'kick';
+    if (!plan) return false;
+    this.resp = null; this.plan = plan; this.pickRoute(); this.cool = 8; this.burst = 5; this.crouchShot = false;
+    this.execute(inp, d, to);
+    return true;
+  }
+  // getting up with someone standing over you: cover up, flip clear, or come up swinging
+  wakeUp(d, to, now, k) {
+    const f = this.f, o = f.opp, L = this.lv, W = f.weapon;
+    if (d > this.reach() + 130 || (o.state !== 'attack' && o.state !== 'rush' && d > Math.max(this.reach(), 60) + 46)) return;
+    if (Math.random() > Math.min(0.92, 0.04 + L.block * 1.95) * k) return;
+    const r = Math.random(), cornered = (to > 0 ? f.x - XMIN : XMAX - f.x) < 70;
+    if (f.meter >= 300 && d <= W.sup.ai[1] && d >= W.sup.ai[0] && r < L.sk * 0.3) { this.plan = 'sp3'; this.cool = 0; this.resp = null; }
+    else if (f.meter >= 100 && W.sp[0].ai[0] <= 60 && d <= W.sp[0].ai[1] && r < L.sk * 0.2) { this.plan = 'sp1'; this.cool = 0; this.resp = null; }
+    else if (!cornered && f.dashCd <= 0 && r < 0.16 + L.dodge * 0.5) this.resp = { type: 'back', at: now, until: now + 4 };
+    else this.resp = { type: 'guard', at: now, until: now + 22 + randi(0, 18) };
+  }
+
+  duringAttack(inp, d, to) {
+    const f = this.f, L = this.lv, m = f.move, W = f.weapon;
     if (!m) return;
     if (f.mkind === 'melee') {
-      const ch = f.weapon.chain;
-      if (ch && ch[f.chainIdx] === m && f.chainIdx + 1 < ch.length && f.mf === f.msu + 2) {
-        if (Math.random() < (f.hitDone ? L.combo : L.combo * 0.3)) inp.atkP = true;
+      if (m.special || m.sup || f.airMove) return;
+      const endA = f.msu + m.ac;
+      if (f.mf !== Math.max(f.msu + 2, endA - 6) || this.didMove === f.moveId) return;      // one decision per move, just after it lands
+      this.didMove = f.moveId;
+      const hit = f.touched === 1, blocked = f.touched === 2, fwSw = to > 0 ? 1 : 2;
+      const ch = W.chain, inChain = !!ch && f.chainIdx >= 0 && ch[f.chainIdx] === m;
+      if (hit && f.meter >= 100 && Math.random() < L.sk * 0.3 + (f.meter >= 300 ? 0.2 : 0)) {       // spend meter in the middle of a combo
+        const k = f.meter >= 300 ? 3 : f.meter >= 200 && Math.random() < 0.5 ? 2 : 1, sp = k === 3 ? W.sup : W.sp[k - 1];
+        if (sp.ai[0] <= 60 && d <= sp.ai[1]) { inp[SPKEY[k] + 'P'] = true; return; }
+      }
+      if (inChain) {
+        const more = f.chainIdx + 1 < ch.length;
+        if (hit) {
+          if (this.route !== 'string' && f.chainIdx >= this.routeAt) { inp.sw = this.route === 'launch' ? 3 : this.route === 'smash' ? fwSw : 4; return; }
+          if (more && Math.random() < L.combo + 0.15) inp.atkP = true;
+        } else if (blocked) {
+          if (more && Math.random() < L.combo * 0.55) inp.atkP = true;
+          else if (Math.random() < L.sk * 0.14) inp.sw = fwSw;                 // lean on their guard
+        } else if (more && Math.random() < L.combo * 0.3) inp.atkP = true;
+      } else if (m.link && hit) {
+        if (m === W.launch) {                                                  // they are in the air now
+          if (W.chain && Math.random() < 0.2 + L.sk * 0.25) inp.sw = 3;         // go up after them
+          else if (Math.random() < L.combo + 0.2) { inp.atkP = true; this.route = Math.random() < 0.5 ? 'smash' : 'string'; this.routeAt = 1; }
+        } else {                                                               // the rush connected
+          const r = Math.random();
+          if (r < L.sk * (W.fire ? 0.55 : 0.3)) inp.sw = 3;
+          else if (r < L.combo + 0.15) { inp.atkP = true; this.pickRoute(); }
+        }
       }
     } else {
       if (f.crouching) inp.d = true;
-      if (m.auto) inp.atk = f.shots < this.burst;
-      else if (m.refire < 900 && !m.burst && f.shots > 0 && f.mf - f.shotAt === 2 && Math.random() < 0.25 + L.combo * 0.45) inp.atkP = true;
+      if (m.special || m.sup) return;
+      const o = f.opp;
+      // an automatic keeps the trigger down a little longer on someone charging in, but does not hold them in place
+      if (m.auto) inp.atk = f.shots < this.burst || (d < 250 && f.shots < this.burst + 4 && (o.state === 'rush' || (o.state === 'walk' && o.running)) && L.sk > 0.3);
+      else if (m.refire < 900 && !m.burst && f.shots > 0 && f.mf - f.shotAt === 2 && Math.random() < 0.25 + L.combo * 0.45 + (d < 260 && o.state !== 'guard' && o.state !== 'block' && o.state !== 'down' ? 0.25 : 0)) inp.atkP = true;
+      // shoot and move: flip away when they are nearly on top of me
+      if (f.shots > 0 && f.mf - f.shotAt === 7 && d < 110 && f.dashCd <= 0 && Math.random() < L.dodge * 0.6) inp.sw = to > 0 ? 2 : 1;
     }
   }
   inAir(inp, d, to) {
@@ -2509,33 +3156,66 @@ class AI {
     }
   }
 
+  // is this a good moment to spend meter?
+  wantSpecial(d) {
+    const f = this.f, L = this.lv, W = f.weapon, o = f.opp;
+    if (o.state === 'air' && W.chain) return false;
+    const ok = sp => d >= sp.ai[0] && d <= sp.ai[1];
+    const p = 0.1 + L.sk * 0.45, close = W.fire && d < 130 ? 2 : 1;       // a gunner with someone in their face reaches for it sooner
+    if (f.meter >= 300 && ok(W.sup) && Math.random() < p + 0.15) { this.plan = 'sp3'; return true; }
+    if (f.meter >= 200 && ok(W.sp[1]) && Math.random() < p * 0.45) { this.plan = 'sp2'; return true; }
+    if (ok(W.sp[0]) && Math.random() < p * (f.meter >= 200 ? 0.45 : 0.32) * close) { this.plan = 'sp1'; return true; }
+    return false;
+  }
   decide(d, to) {
-    const f = this.f, o = f.opp, L = this.lv, W = f.weapon;
+    const f = this.f, o = f.opp, L = this.lv, W = f.weapon, w = f.w;
     this.cool = L.think + randi(0, 6);
     if (Math.random() < L.idle * 0.5) { this.plan = 'wait'; this.cool = randi(10, 28); return; }
-    if (f.meter >= 100 && Math.random() < 0.2 + L.sk * 0.6 && (W.fire ? d > 90 : d < 200) && o.state !== 'down' && o.state !== 'getup') { this.plan = 'super'; return; }
-    const oppDown = o.state === 'down' || o.state === 'getup' || o.state === 'air';
-    if (W.fire) return this.decideRanged(d, to, oppDown);
+    const oppOut = o.state === 'down' || o.state === 'getup', oppAir = o.state === 'air';
+    if (f.meter >= 100 && !oppOut && this.wantSpecial(d)) return;
+    // they have swung at me again and again: cover up before the next one, and hit back when it has been blocked
+    if (this.press >= 2 && d < 120 && w.frame - this.pressAt < 70 && !oppOut && !oppAir && Math.random() < Math.min(0.85, (0.1 + 0.2 * (this.press - 1)) * (0.4 + L.sk))) { this.plan = 'guardup'; this.cool = randi(22, 40); return; }
+    if (W.fire) return this.decideRanged(d, to, oppOut || oppAir);
     const reach = this.reach();
-    if (oppDown) { this.plan = d > reach + 30 ? 'approach' : d < reach - 24 ? 'space' : 'wait'; this.cool = 8; return; }
-    if (o.state === 'attack' && o.move && o.mkind === 'melee' && o.mf > o.msu + o.move.ac && d < reach + 44 && Math.random() < L.punish) { this.plan = d <= reach ? 'strike' : 'dashstrike'; this.cool = 3; return; }
-    if (o.state === 'dizzy' && d < 260) { this.plan = d <= reach ? 'strike' : 'approach'; this.cool = 4; return; }
+    if (oppAir) {                                                              // keep the juggle going, if good enough to
+      if (o.juggle < JUG_MAX - 1 && d <= reach + 44 && o.y > -120 && Math.random() < L.combo * (0.25 + L.sk * 0.75)) { this.plan = 'strike'; this.route = Math.random() < 0.4 ? 'smash' : 'string'; this.routeAt = 1; this.cool = 2; return; }
+      this.plan = d > reach + 30 ? 'approach' : d < reach - 24 ? 'space' : 'wait'; this.cool = 6; return;
+    }
+    if (oppOut) {
+      if (d <= reach + 60 && Math.random() < 0.15 + L.sk * 0.6) { this.plan = 'meaty'; this.pickRoute(); this.cool = 50; return; }
+      this.plan = d > reach + 30 ? 'approach' : d < reach - 24 ? 'space' : 'wait'; this.cool = 8; return;
+    }
+    if (o.state === 'dizzy' && d < 300) { this.plan = d <= reach ? 'strike' : f.rushCd <= 0 ? 'rush' : 'approach'; this.route = L.sk > 0.3 ? 'launch' : 'string'; this.routeAt = 1; this.cool = 4; return; }
+    if (d < reach + 30) this.cool = Math.min(this.cool, 7 + Math.round((1 - L.sk) * 12) + randi(0, 5));       // toe to toe there is no time to dawdle
     const r = Math.random();
     if (d > reach) {
-      const gun = !!o.weapon.fire, dry = gun && !!o.weapon.fire.mag && o.ammo <= 0;
-      if (dry && Math.random() < 0.4 + L.sk * 0.5) this.plan = f.dashCd <= 0 && d > 150 ? 'dashin' : 'approach';        // they are reloading: go
-      else if (gun && d > 140 && f.dashCd <= 0 && r < 0.18 + L.sk * 0.34) this.plan = 'dashin';
-      else if (gun && d > 200 && r < 0.3 + L.sk * 0.4) this.plan = 'jumpin';
-      else if (d > 220 && r < L.aggro * 0.5 && f.dashCd <= 0) this.plan = 'dashin';
-      else if (r < L.aggro + 0.18) this.plan = 'approach';
-      else this.plan = Math.random() < 0.5 ? 'wait' : 'space';
+      this.closeIn(d, reach, r);
     } else {
-      if (r < L.aggro) this.plan = d < 42 && Math.random() < 0.3 ? 'kick' : 'strike';
-      else if (r < L.aggro + 0.1) this.plan = 'kick';
-      else if (r < L.aggro + 0.2) { this.plan = 'guardup'; this.cool = randi(12, 30); }
-      else if (r < L.aggro + 0.27 && L.sk > 0.25) this.plan = 'sweep';
+      if (r < L.aggro) { this.plan = d < 42 && Math.random() < 0.25 ? 'kick' : 'strike'; this.pickRoute(); }
+      else if (r < L.aggro + 0.08) this.plan = 'kick';
+      else if (r < L.aggro + 0.18) { this.plan = 'guardup'; this.cool = randi(12, 30); }
+      else if (r < L.aggro + 0.25 && L.sk > 0.25) this.plan = 'sweep';
+      else if (r < L.aggro + 0.3 && L.dodge > 0.15 && f.dashCd <= 0) this.plan = 'backdash';
       else this.plan = 'space';
     }
+  }
+  // pick a way in from outside striking distance
+  closeIn(d, reach, r) {
+    const f = this.f, o = f.opp, L = this.lv;
+    const gun = !!o.weapon.fire, dry = gun && !!o.weapon.fire.mag && o.ammo <= 0, canRush = f.rushCd <= 0;
+    const loaded = gun && !dry && o.state !== 'attack' ? 0.3 : 1;                 // running straight at a gun that is ready to fire is a bad idea
+    const flair = 0.35 + 0.65 * L.sk, pr = L.aggro * 0.42 * flair;                // early opponents mostly walk in; later ones use the whole move list
+    const flatGun = gun && !dry && PROJ[o.weapon.fire.proj].g === 0 && !PROJ[o.weapon.fire.proj].expl;
+    if (dry && Math.random() < 0.4 + L.sk * 0.5) this.plan = canRush && d > 110 ? 'rush' : 'approach';        // they are reloading: go
+    else if (gun && d > 140 && canRush && r < (0.2 + L.sk * 0.34) * loaded) this.plan = 'rush';
+    else if (flatGun && d > 70 && d < 215 && r < 0.2 + L.sk * 0.45) this.plan = 'slide';                       // under the muzzle
+    else if (gun && d > 150 && r < 0.32 + L.sk * 0.4) this.plan = d < 230 ? 'leap' : 'jumpin';
+    else if (d < reach + 165 && canRush && r < pr * loaded) this.plan = 'rush';                                 // close enough for the rush to arrive
+    else if (d > reach + 50 && d < reach + 175 && r < pr + (0.06 + L.sk * 0.1) * flair) this.plan = 'leap';
+    else if (d > 70 && d < 150 && r < pr + (0.1 + L.sk * 0.16) * flair) this.plan = 'slide';
+    else if (r < L.aggro + 0.2 || gun) this.plan = 'approach';                                                  // never stand in the open in front of a gun
+    else this.plan = Math.random() < 0.5 ? 'wait' : 'space';
+    if (this.plan === 'rush') this.pickRoute();
   }
   decideRanged(d, to, oppDown) {
     const f = this.f, o = f.opp, L = this.lv, W = f.weapon, band = W.band || [150, 500], P = PROJ[W.fire.proj];
@@ -2544,42 +3224,89 @@ class AI {
     if (empty) {
       if (d < 62) { this.plan = Math.random() < 0.6 ? 'kick' : 'guardup'; this.cool = 12; }
       else if (cornered && d < 170) { this.plan = Math.random() < 0.5 ? 'jumpover' : 'guardup'; this.cool = 22; }
-      else if (d < band[0] + 70) this.plan = 'retreat';
+      else if (d < band[0] + 70) this.plan = f.dashCd <= 0 && Math.random() < L.dodge ? 'backdash' : 'retreat';
       else this.plan = 'wait';
       return;
     }
-    if (d < 58 && Math.random() < 0.5) { this.plan = 'kick'; this.cool = 8; return; }
+    if (d < 62 && Math.random() < 0.55 + L.sk * 0.25) {                // too close to shoot: flip clear, boot them off, or knee and launch
+      const r = Math.random();
+      if (!cornered && f.dashCd <= 0 && r < 0.25 + L.dodge * 0.6) this.plan = 'backdash';
+      else if (L.sk > 0.35 && f.rushCd <= 0 && r < 0.5 + L.sk * 0.3) { this.plan = 'rush'; this.route = Math.random() < L.sk * 0.6 ? 'launch' : 'string'; this.routeAt = 0; }
+      else this.plan = 'kick';
+      this.cool = 8; return;
+    }
     if (oppDown && d > band[0]) { this.plan = 'wait'; this.cool = 6; return; }
+    const coming = o.state === 'rush' || (o.state === 'walk' && o.facing === -to && Math.abs(o.vx) > 60) || (o.state === 'attack' && o.move && (o.move.leap || o.move.slide));
     if (d < band[0]) {
       if (cornered) this.plan = !expl && Math.random() < 0.55 ? 'shoot' : 'jumpover';
-      else if (expl || Math.random() < 0.3 + L.sk * 0.4) this.plan = Math.random() < 0.3 && f.dashCd <= 0 ? 'backdash' : 'retreat';
-      else this.plan = 'shoot';
-    } else if (d > band[1]) this.plan = 'approach';
-    else this.plan = Math.random() < L.aggro + 0.22 ? 'shoot' : Math.random() < 0.5 ? 'wait' : 'retreat';
+      else if (expl) this.plan = Math.random() < 0.3 + L.dodge * 0.4 && f.dashCd <= 0 ? 'backdash' : 'retreat';
+      else if (Math.random() < 0.2 + L.dodge * 0.45 && f.dashCd <= 0 && d < 120) this.plan = 'backdash';        // make room, then fire
+      else this.plan = Math.random() < 0.12 ? 'retreat' : 'shoot';                                              // at this range a shot still lands
+    } else if (d > band[1]) { this.closeIn(d, band[1], Math.random()); if (this.plan === 'wait' || this.plan === 'space') this.plan = 'approach'; }
+    else this.plan = Math.random() < L.aggro + 0.22 + (coming ? 0.35 : 0) ? 'shoot' : Math.random() < 0.5 ? 'wait' : 'retreat';
     if (this.plan === 'shoot') {
       this.burst = W.fire.auto ? randi(3, 4 + Math.round(L.sk * 4)) : 0;
       this.crouchShot = !expl && P.g === 0 && (o.crouching || o.state === 'crouch') && Math.random() < 0.1 + L.sk * 0.4;
     }
+    if (f.w.frame < this.cover && (this.plan === 'wait' || this.plan === 'retreat') && d > 150) this.plan = 'cover';
   }
   execute(inp, d, to) {
-    const f = this.f, fw = to > 0 ? 'r' : 'l', bk = to > 0 ? 'l' : 'r';
+    const f = this.f, fw = to > 0 ? 'r' : 'l', bk = to > 0 ? 'l' : 'r', L = this.lv;
     switch (this.plan) {
-      case 'approach': inp[fw] = true; if (!f.weapon.fire && d <= this.reach()) this.cool = 0; break;
-      case 'dashin': inp[fw] = true; inp.dashP = true; this.plan = 'approach'; break;
-      case 'dashstrike': inp[fw] = true; inp.dashP = true; this.plan = 'strike'; this.cool = 9; break;
-      case 'retreat': inp[bk] = true; break;
-      case 'backdash': inp[bk] = true; inp.dashP = true; this.plan = 'retreat'; this.cool = 12; break;
+      case 'approach': inp[fw] = true; if (d > 210 && L.sk > 0.12) inp.run = true; if (!f.weapon.fire && d <= this.reach()) this.cool = 0; break;
+      case 'rush': inp.sw = to > 0 ? 1 : 2; this.plan = 'wait'; this.cool = 16; break;
+      case 'retreat': {
+        const o = f.opp, F = f.weapon.fire;
+        // backing away from someone who is already charging in gets a gunner nowhere: stand and fire
+        if (F && (!F.mag || f.ammo > 0) && !PROJ[F.proj].expl && (o.state === 'rush' || (o.state === 'walk' && o.running)) && d < 260 && L.sk > 0.15) { inp.atkP = true; inp.atk = true; this.burst = 5; this.plan = 'wait'; this.cool = 4; }
+        else inp[bk] = true;
+        break;
+      }
+      case 'backdash': {                                    // flip clear; a gunner fires as soon as their feet are down
+        const F = f.weapon.fire, fire = !!F && (!F.mag || f.ammo > 0) && !PROJ[F.proj].expl;
+        inp.sw = to > 0 ? 2 : 1; this.plan = fire ? 'shoot' : 'retreat'; this.cool = fire ? FLIP_T + 2 : 14; this.burst = 5; this.crouchShot = false;
+        break;
+      }
       case 'space': if (d < this.reach() + 12) inp[bk] = true; else if (d > this.reach() + 54) inp[fw] = true; break;
-      case 'strike': if (d <= this.reach() + 26) { inp.atkP = true; this.plan = 'wait'; this.cool = 6; } else inp[fw] = true; break;
-      case 'kick': inp.kickP = true; this.plan = 'wait'; this.cool = 8; break;
-      case 'sweep': inp.d = true; inp.kickP = true; this.plan = 'wait'; this.cool = 10; break;
+      case 'strike': case 'kick': case 'sweep': {
+        const o = f.opp;
+        if (o.state === 'attack' && o.armor && !o.armorSpent && o.mkind === 'melee' && o.mf < o.msu + o.move.ac && d < o.move.r1 * o.sc + 50 && L.sk > 0.2) {
+          // a light hit will not stop that swing: get out of its way, or block it if the guard can take it
+          const m = o.move, breaks = m.dmg * 1.6 * (m.gb || 1) / f.mods.guard >= f.guardG - 6;
+          if (breaks && f.dashCd <= 0) inp.sw = to > 0 ? 2 : 1; else if (breaks) { inp.u = true; inp[bk] = true; } else inp.guard = true;
+          break;
+        }
+        if (this.plan === 'kick') { inp.kickP = true; this.plan = 'wait'; this.cool = 8; break; }
+        if (this.plan === 'sweep') { inp.d = true; inp.kickP = true; this.plan = 'wait'; this.cool = 10; break; }
+        if (d <= this.reach() + 26) { inp.atkP = true; this.plan = 'wait'; this.cool = 6; } else inp[fw] = true;
+        break;
+      }
+      case 'meaty': {                                       // stand over them and swing so that it lands as they stand up
+        const o = f.opp, su = f.weapon.chain ? f.weapon.chain[0].su : 6;
+        if (d > this.reach() + 6) inp[fw] = true; else if (d < this.reach() - 30) inp[bk] = true;
+        if (o.state === 'getup' && 16 - o.st + 4 <= su + 1 && d <= this.reach() + 20) { inp.atkP = true; this.plan = 'wait'; this.cool = 5; }
+        else if (o.state !== 'down' && o.state !== 'getup') { this.plan = 'wait'; this.cool = 0; }
+        break;
+      }
       case 'guardup': inp.guard = true; break;
-      case 'shoot': if (this.crouchShot) inp.d = true; inp.atkP = true; inp.atk = true; this.plan = 'wait'; this.cool = (f.weapon.fire.mag ? randi(12, 26) : randi(4, 12)) + Math.round((1 - this.lv.sk) * 16); break;
+      case 'cover': inp.d = true; break;                     // head down under fire
+      case 'shoot':
+        if (this.crouchShot || (f.w.frame < this.cover && d > 150)) inp.d = true;
+        inp.atkP = true; inp.atk = true; this.plan = 'wait';
+        this.cool = d < 240 ? (f.weapon.fire.auto ? 12 : 2) + Math.round((1 - L.sk) * 12) : (f.weapon.fire.mag ? randi(12, 26) : randi(4, 12)) + Math.round((1 - L.sk) * 16);
+        break;
+      case 'leap': inp.sw = 3; this.plan = 'wait'; this.cool = 34; break;
+      case 'slide': inp.sw = 4; this.plan = 'wait'; this.cool = 26; break;
       case 'jumpin': inp.u = true; inp[fw] = true; this.airDone = false; this.plan = 'jumping'; this.cool = 30; break;
       case 'jumping': this.plan = f.weapon.fire ? 'retreat' : 'approach'; this.cool = Math.min(this.cool, 12); break;
       case 'jumpover': inp.u = true; inp[fw] = true; this.airDone = true; this.plan = 'jumping'; this.cool = 40; break;
-      case 'super': inp.supP = true; this.plan = 'wait'; this.cool = 10; break;
-      default: break;
+      case 'sp1': inp.sp1P = true; this.plan = 'wait'; this.cool = 12; break;
+      case 'sp2': inp.sp2P = true; this.plan = 'wait'; this.cool = 12; break;
+      case 'sp3': inp.sp3P = true; this.plan = 'wait'; this.cool = 12; break;
+      default:                                              // waiting. Within their reach, and good enough to know better, that means behind a guard
+        if (this.plan === 'wait' && d < 105 && this.press >= 1 && f.w.frame - this.pressAt < 80 && L.sk > 0.3) inp.guard = true;
+        else if (this.plan === 'wait' && this.shots >= 2 && f.w.frame - this.shotsAt < 46 && L.sk > 0.3 && f.guardG > 30) inp.guard = true;       // or, with shots coming in, the same
+        break;
     }
   }
 }
@@ -3049,40 +3776,92 @@ function overlayPanel(w, h, title) {
   return { x, y, w, h };
 }
 function drawHelp() {
-  const P = overlayPanel(Math.min(660, view.W - view.sl - view.sr - 24), 322, 'How to play');
-  const c1 = P.x + 30, c2 = P.x + P.w * 0.61, y0 = P.y + 70, lh = 19;
+  const sw = swipeMode();
+  const P = overlayPanel(Math.min(680, view.W - view.sl - view.sr - 24), 340, 'How to play');
+  const c1 = P.x + 30, c2 = P.x + P.w * 0.58, y0 = P.y + 68, lh = 18.5;
   const rows = (x, lab, title, list) => {
     txt(title, x, y0, 13, { col: RED, w: 700 });
-    list.forEach((r, i) => { txt(r[0], x, y0 + 22 + i * lh, 13, { w: 700 }); txt(r[1], x + lab, y0 + 22 + i * lh, 13, { col: '#c9c9cf', w: 500 }); });
+    list.forEach((r, i) => { txt(r[0], x, y0 + 21 + i * lh, 13, { w: 700 }); txt(r[1], x + lab, y0 + 21 + i * lh, 13, { col: '#c9c9cf', w: 500 }); });
   };
-  rows(c1, 78, 'On the phone', [['Left thumb', 'Slide to move. Up jumps, down crouches.'], ['Attack', 'Swing or fire. Tap again to chain hits.'], ['Kick', 'A quick shove. A sweep from a crouch.'],
-    ['Guard', 'Hold to block hits from the front.'], ['Dash', 'Burst forward, or back to dodge.'], ['Super', 'Lights up when the red meter fills.']]);
-  rows(c2, 84, 'Keys or a controller', [['A D, arrows', 'Move'], ['W, up', 'Jump'], ['S, down', 'Crouch'], ['J  K  L', 'Attack, kick, guard'], ['Shift', 'Dash'], ['Space', 'Super. P pauses.']]);
-  const ty = y0 + 22 + 6 * lh + 10;
+  if (sw) rows(c1, 92, 'On the phone: anywhere on the screen', [['Tap', 'Attack. Tap again to chain hits.'], ['Swipe toward', 'Rush in and strike.'], ['Swipe away', 'Flip back out of reach.'],
+    ['Swipe up', 'Leap at them.'], ['Swipe down', 'Slide under and trip them.'], ['Hold', 'Guard against hits from the front.'], ['1, 2, bolt', 'Specials and the super. They cost meter.']]);
+  else rows(c1, 78, 'On the phone: stick and buttons', [['Left thumb', 'Slide to move. Up jumps, down crouches.'], ['Attack', 'Swing or fire. Press again to chain hits.'], ['Kick', 'A quick shove. A sweep from a crouch.'],
+    ['Guard', 'Hold to block.'], ['Dash', 'Rush in. With a direction: flip, leap, slide.'], ['1, 2, bolt', 'Specials and the super. They cost meter.']]);
+  rows(c2, 80, 'Keys or a controller', [['A D, W, S', 'Move, jump, crouch'], ['J  K  L', 'Attack, kick, guard'], ['Shift', 'Dash: rush in'], ['Shift + way', 'Flip back, leap or slide'], ['U  I', 'Specials 1 and 2'], ['Space', 'Super. P pauses.']]);
+  const ty = y0 + 21 + 7 * lh + 8;
   g.fillStyle = '#2a2a2e'; g.fillRect(P.x + 24, ty - 12, P.w - 48, 1.5);
-  txtWrap('Bullets fly at chest height: crouch or dash forward to slip under them. A guard that soaks up too many hits breaks. Out of ammo? The attack button kicks until the reload finishes.', c1, ty + 8, 12.5, P.w - 210, 17, { col: '#c9c9cf', w: 500 });
+  txtWrap(sw ? 'Leave your finger down after a swipe to keep running or stay low. Combos: once a hit lands, swipe up to launch them and keep tapping while they are in the air, swipe toward to knock them across the arena, or swipe down to sweep.'
+    : 'Combos: once a hit lands, Up and Dash launches them, Dash knocks them across the arena, Down and Dash sweeps. Hits fill the meter. Options has swipe controls.', c1, ty + 7, 12.5, P.w - 210, 16.5, { col: '#c9c9cf', w: 500 });
   return button(P.x + P.w - 150, P.y + P.h - 52, 120, 34, 'Got it', { kind: 'primary', key: ['Enter', 'Escape', 'Space'] });
+}
+// the move list for one weapon: combo routes on the left, what the meter buys on the right
+function drawMoves(W) {
+  const sw = swipeMode();
+  const P = overlayPanel(Math.min(680, view.W - view.sl - view.sr - 24), 340, 'Moves');
+  txt(W.name, P.x + P.w - 30, P.y + 35, 14, { align: 'right', col: ERAS[W.era].hue, w: 700 });
+  const c1 = P.x + 30, c2 = P.x + P.w * 0.55, y0 = P.y + 68, lh = 19, lab = 134;
+  const G = sw ? { tap: 'Tap', then: 'then ', up: 'swipe up', fwd: 'swipe toward', down: 'swipe down', Up: 'Swipe up', Fwd: 'Swipe toward', Down: 'Swipe down', Back: 'Swipe away' }
+    : { tap: 'Attack', then: 'then ', up: 'Up + Dash', fwd: 'Dash', down: 'Down + Dash', Up: 'Up + Dash', Fwd: 'Dash', Down: 'Down + Dash', Back: 'Back + Dash' };
+  const gun = !!W.fire, n = gun ? 0 : W.chain.length;
+  const combos = gun ? [
+    [G.Fwd, 'Rush in with a knee'],
+    ['... ' + G.then + G.up, 'Flip kick that launches'],
+    ['... ' + G.then + G.tap.toLowerCase(), 'Shoot them out of the air'],
+    ['... or ' + G.fwd, 'Boot them across the arena'],
+    [G.Up, 'Leaping kick'],
+    [G.Down, 'Slide under their shots'],
+    [G.Back, 'Flip away, then fire']
+  ] : [
+    [n > 1 ? G.tap + ' x ' + n : G.tap, n > 1 ? 'The string' : 'The grind'],
+    ['... ' + G.then + G.up, 'Launch, then juggle'],
+    ['... ' + G.then + G.fwd, 'Knock them into the wall'],
+    ['... ' + G.then + G.down, 'Sweep them off their feet'],
+    [G.Fwd + ', ' + G.tap.toLowerCase(), 'Rush strike into the string'],
+    ['Launch, ' + G.up, 'Leap up and spike them'],
+    ['Any hit, then 1 or 2', 'Cancel into a special']
+  ];
+  txt('Combos', c1, y0, 13, { col: RED, w: 700 });
+  combos.forEach((r, i) => { txt(r[0], c1, y0 + 22 + i * lh, 13, { w: 700 }); txt(r[1], c1 + lab, y0 + 22 + i * lh, 13, { col: '#c9c9cf', w: 500 }); });
+  txt('Meter', c2, y0, 13, { col: RED, w: 700 });
+  let y = y0 + 23;
+  const rx = P.x + P.w - 30;
+  [[1, W.sp[0]], [2, W.sp[1]], [3, W.sup]].forEach(e => {
+    const k = e[0], m = e[1];
+    g.fillStyle = k === 3 ? RED : PAPER; slabPath(c2 + 1, y - 11, 17, 14, 2); g.fill();
+    if (k === 3) { g.fillStyle = PAPER; g.save(); g.translate(c2 + 9.5, y - 4); g.scale(0.52, 0.52); PAD_ICON.sup(); g.restore(); }
+    else stickText(String(k), c2 + 9.5, y - 0.5, 8, { align: 0.5, rim: null, col: INK, wt: 0.2, slant: 0.05 });
+    txt(m.name, c2 + 28, y, 13.5, { w: 700 });
+    txt(k === 1 ? '1 bar' : k + ' bars', rx, y, 12, { align: 'right', col: '#8d8d93', w: 600 });
+    const lines = txtWrap(m.desc, c2 + 28, y + 16, 12.5, rx - (c2 + 28), 15.5, { col: '#c9c9cf', w: 500 });
+    y += 24 + lines * 15.5 + 6;
+  });
+  return button(P.x + P.w - 150, P.y + P.h - 52, 120, 34, 'Back', { kind: 'primary', key: ['Enter', 'Escape', 'Space'] });
 }
 const optState = { confirm: false };
 function drawOptions(inFight) {
-  const P = overlayPanel(Math.min(520, view.W - view.sl - view.sr - 30), 330, 'Options');
+  const P = overlayPanel(Math.min(520, view.W - view.sl - view.sr - 30), 358, 'Options');
   const x = P.x + 30, bx = P.x + P.w - 150;
-  let y = P.y + 74;
+  let y = P.y + 72;
+  const sw = swipeMode();
+  txt('Touch controls', x, y, 15, { w: 700 });
+  txtWrap(sw ? 'Tap, swipe and hold anywhere on the screen.' : 'A thumb stick on the left, buttons on the right.', x, y + 16, 12, bx - x - 18, 15, { col: '#a9a9b0', w: 500 });
+  if (button(bx, y - 14, 112, 30, sw ? 'Swipe' : 'Buttons', { kind: 'plain', size: 10.5 })) { save.controls = sw ? 'pad' : 'swipe'; writeSave(); releaseAll(); layoutControls(); }
+  y += 52;
   txt('Sound', x, y + 6, 15, { w: 700 });
   if (button(bx, y - 14, 112, 30, save.sound ? 'On' : 'Off', { kind: save.sound ? 'plain' : 'ghost', size: 11 })) { save.sound = !save.sound; writeSave(); }
-  y += 44;
+  y += 40;
   txt('Screen shake', x, y + 6, 15, { w: 700 });
   if (button(bx, y - 14, 112, 30, save.shake ? 'On' : 'Off', { kind: save.shake ? 'plain' : 'ghost', size: 11 })) { save.shake = !save.shake; writeSave(); }
-  y += 46;
+  y += 42;
   txt('Sideways mode', x, y, 15, { w: 700 });
-  txtWrap('Draws the game turned on its side, for playing with rotation lock on.', x, y + 17, 12, bx - x - 18, 15, { col: '#a9a9b0', w: 500 });
+  txtWrap('Draws the game turned on its side, for playing with rotation lock on.', x, y + 16, 12, bx - x - 18, 15, { col: '#a9a9b0', w: 500 });
   if (button(bx, y - 14, 112, 30, save.sideways ? 'On' : 'Off', { kind: save.sideways ? 'plain' : 'ghost', size: 11 })) { save.sideways = !save.sideways; writeSave(); layout(); }
-  y += 68;
+  y += 64;
   if (!inFight) {
     txt('Progress', x, y, 15, { w: 700 });
     txtWrap(optState.confirm ? 'This wipes every tier, weapon and fighter you unlocked.' : 'Tier ' + save.cleared + ' of ' + LAST_TIER + ' cleared.', x, y + 17, 12, bx - x - 18, 15, { col: optState.confirm ? RED : '#a9a9b0', w: 500 });
     if (button(bx, y - 14, 112, 30, optState.confirm ? 'Really reset' : 'Reset', { kind: optState.confirm ? 'primary' : 'ghost', size: 10, snd: 'uiBack' })) {
-      if (optState.confirm) { save.cleared = 0; save.asc = 0; save.fighter = 'ash'; save.weapon = 'club'; save.picked = false; save.wins = 0; save.losses = 0; save.lossTier = 0; save.lossCount = 0; writeSave(); optState.confirm = false; }
+      if (optState.confirm) { save.cleared = 0; save.asc = 0; save.fighter = 'ash'; save.weapon = 'club'; save.picked = false; save.wins = 0; save.losses = 0; save.lossTier = 0; save.lossCount = 0; save.tut = 0; writeSave(); optState.confirm = false; }
       else optState.confirm = true;
     }
   }
@@ -3128,7 +3907,7 @@ const Title = {
     g.restore();
     txt('Nineteen tiers, from the first thrown bone to the last rocket.', x + 4, 200, 14, { col: '#d6d6dc', w: 500, alpha: clamp((this.t - 20) / 20, 0, 1) });
 
-    if (this.overlay === 'help') { if (drawHelp()) { this.overlay = null; save.seenHelp = true; writeSave(); } return; }
+    if (this.overlay === 'help') { if (drawHelp()) { this.overlay = null; save.seenHelp = true; save.seenMoves = true; writeSave(); } return; }
     if (this.overlay === 'options') { if (drawOptions(false)) this.overlay = null; return; }
 
     const by = 228, bw = 218;
@@ -3138,7 +3917,7 @@ const Title = {
     if (button(x, by + 54, bw * 0.5 - 6, 34, 'How to play', { kind: 'ghost', size: 9.5 })) this.overlay = 'help';
     if (button(x + bw * 0.5 + 6, by + 54, bw * 0.5 - 6, 34, 'Options', { kind: 'ghost', size: 9.5 })) this.overlay = 'options';
     if (IOS_TAB) txt('For full screen: Share, then Add to Home Screen.', x + 2, SB() - 12, 12, { col: '#9a9aa2', w: 500 });
-    else if (FINE_POINTER) txt('Keys: A D move, W jump, S crouch, J attack, K kick, L guard, Shift dash, Space super', x + 2, SB() - 12, 12, { col: '#9a9aa2', w: 500 });
+    else if (FINE_POINTER) txt('Keys: A D move, W jump, S crouch, J attack, K kick, L guard, Shift dash, U I specials, Space super', x + 2, SB() - 12, 12, { col: '#9a9aa2', w: 500 });
     if (DEV) txt('dev: everything unlocked', SR() - 12, 18, 11, { col: RED, align: 'right' });
   }
 };
@@ -3262,7 +4041,7 @@ const Armory = {
     this.setCur(weaponOpen(save.weapon) ? save.weapon : 'club', true);
   },
   setCur(id, quiet) {
-    this.cur = id; this.inT = 0; this.demoT = 20;
+    this.cur = id; this.inT = 0; this.demoT = 20; this.demoK = -1;
     this.stage = makeStage(FIGHTER_BY_ID[save.fighter], id);
     if (!quiet) sfx('uiMove');
   },
@@ -3277,14 +4056,19 @@ const Armory = {
     if (this.shake > 0) this.shake--;
     // the preview fighter shows the weapon off on a loop
     const st = this.stage, f = st.f, inp = st.inp, W = f.weapon;
-    inp.atkP = false; inp.atk = false;
+    inp.atkP = inp.atk = inp.sp1P = inp.sp2P = inp.sp3P = false;
     this.demoT--;
-    if (f.canAct() && this.demoT <= 0) { inp.atkP = true; inp.atk = true; this.demoT = 110; this.mash = 0; }
-    else if (f.state === 'attack') {
+    if (f.canAct() && this.demoT <= 0) {
+      const k = this.demoK = (this.demoK + 1) % 4;                    // the string, special 1, special 2, the super
+      f.meter = METER_MAX; f.hp = f.hpMax;
+      if (k === 0) { inp.atkP = true; inp.atk = true; } else inp[SPKEY[k] + 'P'] = true;
+      this.demoT = k === 0 ? 105 : 135;
+    } else if (f.state === 'attack' && f.move && !f.move.special && !f.move.sup) {
       if (f.mkind === 'melee' && f.mf === f.msu + 1) inp.atkP = true;
       else if (f.mkind === 'fire') { if (W.fire.auto) inp.atk = f.shots < 10; else if (f.shots > 0 && f.shots < 3 && f.mf - f.shotAt === 2) inp.atkP = true; }
     }
     st.w.step(inp, inp);
+    st.w.fx.texts.length = 0;                                       // the move's name is shown in the list instead
     st.cx += (f.x - st.cx) * 0.2;                                   // the view follows lunges
     if (f.canAct() && Math.abs(f.x - AW / 2) > 4 && this.demoT < 60) { const dx = AW / 2 - f.x; f.x += dx; st.cx += dx; f.tail.x += dx; f.trail.length = 0; st.w.fx.p.length = 0; st.w.fx.ghosts.length = 0; }
     if (this.done && ++this.done > 22) go(Ladder);
@@ -3335,7 +4119,18 @@ const Armory = {
     statBar(ix, gy + 66, iw, 'Damage', cur.bars[0], 10, open ? PAPER : GREY);
     statBar(ix, gy + 88, iw, 'Speed', cur.bars[1], 10, open ? PAPER : GREY);
     statBar(ix, gy + 110, iw, 'Reach', cur.bars[2], 10, open ? PAPER : GREY);
-    txtWrap(open ? cur.blurb : 'Beat tier ' + cur.tier + ' to unlock.', ix, gy + 136, 12.5, iw, 16, { col: '#c9c9cf', w: 500 });
+    const bl = txtWrap(open ? cur.blurb : 'Beat tier ' + cur.tier + ' to unlock.', ix, gy + 136, 12.5, iw, 16, { col: '#c9c9cf', w: 500 });
+    // what the meter buys with this weapon
+    let sy = Math.max(gy + 136 + bl * 16 + 6, SB() - 46 - 50);
+    const showing = open && this.stage.f.move ? [cur.sp[0], cur.sp[1], cur.sup].indexOf(this.stage.f.move) : -1;     // the one the preview is performing
+    [cur.sp[0], cur.sp[1], cur.sup].forEach((m, i) => {
+      if (i === showing) { g.fillStyle = '#3a0a0e'; slabPath(ix - 4, sy - 12.5, iw + 4, 16.5, 2); g.fill(); g.fillStyle = RED; slabPath(ix - 4, sy - 12.5, 3, 16.5, 0.6); g.fill(); }
+      g.fillStyle = !open ? '#3a3a40' : i === 2 ? RED : PAPER; slabPath(ix + 1, sy - 10, 15, 12.5, 1.6); g.fill();
+      if (i === 2) { g.fillStyle = open ? PAPER : GREY; g.save(); g.translate(ix + 8.5, sy - 3.6); g.scale(0.46, 0.46); PAD_ICON.sup(); g.restore(); }
+      else stickText(String(i + 1), ix + 8.5, sy - 0.4, 7, { align: 0.5, rim: null, col: INK, wt: 0.2, slant: 0.05 });
+      txt(m.name, ix + 23, sy, 12.5, { col: open ? PAPER : GREY, w: 700 });
+      sy += 15.5;
+    });
 
     const by = SB() - 46;
     if (button(L, by, 104, 36, 'Back', { kind: 'ghost', size: 11, snd: 'uiBack', key: ['Escape', 'Backspace'] })) go(Select);
@@ -3491,19 +4286,76 @@ const Versus = {
   }
 };
 
-// ───────────────────────── the fight: rounds, HUD, touch pad, results ─────────────────────────
+// ───────────────────────── the fight: rounds, HUD, touch controls, results ─────────────────────────
 const PAD_ICON = {
   kick() { polyPath([-5, -9, 1, -9, 1, -1, 9, 1, 9, 6, -5, 6]); g.fill(); },
   guard() { polyPath([0, -10, 8.5, -6.5, 8.5, 1, 0, 10, -8.5, 1, -8.5, -6.5]); g.fill(); },
   dash() { g.lineWidth = 3.4; g.lineCap = 'round'; g.lineJoin = 'round'; g.beginPath(); g.moveTo(-8, -7); g.lineTo(-1, 0); g.lineTo(-8, 7); g.moveTo(1, -7); g.lineTo(8, 0); g.lineTo(1, 7); g.stroke(); },
   sup() { polyPath([2.5, -11, -6.5, 1.5, -1, 1.5, -3.5, 11, 6.5, -2.5, 1, -2.5]); g.fill(); }
 };
-const PAD_LABEL = { kick: 'Kick', guard: 'Guard', dash: 'Dash', sup: 'Super' };
+const PAD_LABEL = { kick: 'Kick', guard: 'Guard', dash: 'Dash' };
+const SP_NUM = { sp1: 1, sp2: 2, sp3: 3 };
+
+// one of the three meter buttons: 1 and 2 are the weapon's specials, the bolt is the super
+function drawSpecialBtn(b, f, named) {
+  const k = SP_NUM[b.name], ready = f.meter >= k * 100, sup = k === 3, held = b.held > 0;
+  const frac = clamp((f.meter - (k - 1) * 100) / 100, 0, 1);
+  g.globalAlpha = ready ? 0.86 + 0.14 * Math.sin(tick * 0.25 + k) : 0.46;
+  g.fillStyle = held ? 'rgba(255,255,255,0.55)' : ready ? (sup ? RED : PAPER) : 'rgba(0,0,0,0.5)';
+  disc(b.x, b.y, b.r);
+  g.strokeStyle = ready && !sup ? INK : PAPER; g.lineWidth = 2.2; ring(b.x, b.y, b.r);
+  if (ready) { g.strokeStyle = sup ? PAPER : RED; g.lineWidth = 2; ring(b.x, b.y, b.r + 3.5); }
+  else if (frac > 0.01) { g.globalAlpha = 0.9; g.strokeStyle = RED; g.lineWidth = 3.6; g.lineCap = 'butt'; g.beginPath(); g.arc(b.x, b.y, b.r, -PI / 2, -PI / 2 + TAU * frac); g.stroke(); g.lineCap = 'round'; }
+  g.globalAlpha = ready ? 1 : 0.62;
+  const ink = ready && !sup ? INK : PAPER;
+  if (sup) { g.fillStyle = ink; g.save(); g.translate(b.x, b.y); g.scale(b.r / 21, b.r / 21); PAD_ICON.sup(); g.restore(); }
+  else stickText(String(k), b.x + 0.5, b.y + b.r * 0.36, b.r * 0.74, { align: 0.5, col: ink, rim: null, wt: 0.2, slant: 0.06 });
+  if (named) {
+    const m = sup ? f.weapon.sup : f.weapon.sp[k - 1];
+    txt(m.name, b.x, b.y - b.r - 6, 10, { align: 'center', w: 700, sh: true, col: ready ? PAPER : '#b4b4bc' });
+  }
+  g.globalAlpha = 1;
+}
+// where the fingers are and what they just did
+function drawTouches() {
+  const M = ctl.marks;
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  for (let i = M.length - 1; i >= 0; i--) {
+    const m = M[i];
+    if (--m.life <= 0) { M.splice(i, 1); continue; }
+    const u = m.life / (m.k === 1 ? 18 : 12);
+    g.globalAlpha = Math.min(1, u * 1.5) * 0.85;
+    if (m.k === 0) { g.strokeStyle = PAPER; g.lineWidth = 2.6; ring(m.x, m.y, 12 + (1 - u) * 16); }
+    else if (m.k === 2) { g.strokeStyle = '#bfe9ff'; g.lineWidth = 3; ring(m.x, m.y, 30 - (1 - u) * 6); }
+    else {
+      const vx = m.dir === 1 ? 1 : m.dir === 2 ? -1 : 0, vy = m.dir === 3 ? -1 : m.dir === 4 ? 1 : 0, L = 30 + (1 - u) * 30;
+      const x1 = m.x + vx * L, y1 = m.y + vy * L;
+      g.strokeStyle = INK; g.lineWidth = 8 * u + 3;
+      for (let pass = 0; pass < 2; pass++) {
+        g.beginPath(); g.moveTo(m.x, m.y); g.lineTo(x1, y1);
+        g.moveTo(x1 - vx * 11 - vy * 9, y1 - vy * 11 - vx * 9); g.lineTo(x1, y1); g.lineTo(x1 - vx * 11 + vy * 9, y1 - vy * 11 + vx * 9); g.stroke();
+        g.strokeStyle = PAPER; g.lineWidth = 5 * u + 1.2;
+      }
+    }
+  }
+  for (const P of ptrs.values()) {
+    if (P.role !== 'gest') continue;
+    if (P.phase === 1) { g.globalAlpha = 0.75; g.fillStyle = 'rgba(191,233,255,0.2)'; disc(P.x, P.y, 26); g.strokeStyle = '#bfe9ff'; g.lineWidth = 3; ring(P.x, P.y, 26); }
+    else if (P.phase === 2) { g.globalAlpha = 0.5; g.fillStyle = PAPER; disc(P.x, P.y, 10); }
+  }
+  g.globalAlpha = 1;
+}
 
 function drawPad(f) {
-  if (!ctl.touchSeen) return;
-  const s = ctl.stick, on = s.id !== null;
   g.save();
+  if (swipeMode()) {                                         // nothing on screen but the meter buttons and your own fingerprints
+    for (const b of ctl.btns) drawSpecialBtn(b, f, true);
+    drawTouches();
+    g.restore();
+    return;
+  }
+  if (!ctl.touchSeen) { g.restore(); return; }
+  const s = ctl.stick, on = s.id !== null;
   g.globalAlpha = on ? 0.62 : 0.36;
   g.fillStyle = 'rgba(0,0,0,0.4)'; disc(s.bx, s.by, s.r + 10);
   g.strokeStyle = PAPER; g.lineWidth = 2; ring(s.bx, s.by, s.r + 10);
@@ -3515,13 +4367,11 @@ function drawPad(f) {
   g.globalAlpha = on ? 0.92 : 0.58;
   g.fillStyle = PAPER; disc(s.x, s.y, 21); g.fillStyle = 'rgba(0,0,0,0.22)'; disc(s.x, s.y, 14);
   for (const b of ctl.btns) {
-    const held = b.held > 0, isSup = b.name === 'sup', full = f.meter >= 100;
-    let fill = held ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.44)', alpha = held ? 0.96 : 0.66;
-    if (isSup) { if (full) { fill = rgba(RED, 0.8); alpha = 0.8 + 0.2 * Math.sin(tick * 0.25); } else alpha = 0.36; }
+    if (b.name in SP_NUM) { drawSpecialBtn(b, f, false); continue; }
+    const held = b.held > 0, alpha = held ? 0.96 : 0.66;
     g.globalAlpha = alpha;
-    g.fillStyle = fill; disc(b.x, b.y, b.r);
+    g.fillStyle = held ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.44)'; disc(b.x, b.y, b.r);
     g.strokeStyle = PAPER; g.lineWidth = 2.2; ring(b.x, b.y, b.r);
-    if (isSup && !full) { g.globalAlpha = 0.8; g.strokeStyle = RED; g.lineWidth = 3.4; g.lineCap = 'butt'; g.beginPath(); g.arc(b.x, b.y, b.r, -PI / 2, -PI / 2 + TAU * clamp(f.meter / 100, 0, 1)); g.stroke(); g.globalAlpha = alpha; }
     if (b.name === 'atk') {
       const W = f.weapon, dry = !!W.fire && !!W.fire.mag && f.ammo <= 0;
       g.globalAlpha = Math.min(1, alpha + 0.2);
@@ -3540,6 +4390,19 @@ function drawPad(f) {
   g.restore();
 }
 
+// first-fight coaching: one line at a time, each cleared by doing the thing it describes
+const used = (f, k) => f.used[k] || 0;
+const COACH = [
+  { swipe: 'Tap anywhere to attack. Keep tapping to chain the hits.', pad: 'Attack swings or fires. Press it again to chain the hits.', gun: ['Tap anywhere to fire.', 'Attack fires.'], done: f => used(f, 'atk') >= 3 },
+  { swipe: 'Swipe toward them to rush in.', pad: 'Dash rushes in.', done: f => used(f, 'rush') >= 1 },
+  { swipe: 'Swipe away from them to flip back out of reach.', pad: 'Hold away and press Dash to flip back out of reach.', done: f => used(f, 'flip') >= 1 },
+  { swipe: 'Hold a finger still to guard.', pad: 'Hold Guard to block.', done: f => used(f, 'held') + used(f, 'block') >= 1 },
+  { swipe: 'Swipe up to leap in. Swipe down to slide under.', pad: 'Up and Dash leaps in. Down and Dash slides under.', done: f => used(f, 'leap') + used(f, 'slide') >= 1 },
+  { swipe: 'Land a hit, then swipe up to launch them. Keep tapping while they are in the air.', pad: 'Land a hit, then Up and Dash to launch them. Keep attacking while they are in the air.',
+    gun: ['Rush in, then swipe up to kick them into the air. Then shoot.', 'Dash in, then Up and Dash to kick them into the air. Then shoot.'], done: f => used(f, 'launch') >= 1 },
+  { swipe: 'One bar of meter is full. Tap 1 to spend it on a special.', pad: 'One bar of meter is full. Press 1 to spend it on a special.', wait: 'Hits fill the red meter under your health.', done: f => used(f, 'special') >= 1 }
+];
+
 const Fight = {
   enter() {
     const n = game.tier, info = tierInfo(n), L = difficulty(n);
@@ -3555,9 +4418,9 @@ const Fight = {
     this.inp = blankInput(); this.blank = blankInput();
     this.round = 1; this.phase = 'intro'; this.pt = 0; this.timer = 3600; this.timeUp = false; this.roundWin = null;
     this.paused = false; this.overlay = null; this.draws = 0; this.msg = null; this.frames = 0; this.perfects = 0; this.ended = false;
-    this.auto = null;
-    w.snapCam(); ctl.on = true;
-    if (!save.seenHelp) { this.paused = true; this.overlay = 'help'; }
+    this.auto = null; this.coachT = 0; this.coachOk = 0;
+    w.snapCam(); ctl.on = true; clearEdges();
+    if (!save.seenMoves) { this.paused = true; this.overlay = 'help'; }
   },
   leave() { ctl.on = false; ctl.zones.length = 0; releaseAll(); },
   say(str, col, life, big, sub) { this.msg = { str, col: col || PAPER, life, max: life, big: big || 1, sub: sub || null }; },
@@ -3571,12 +4434,13 @@ const Fight = {
         w.step(this.blank, this.blank);
         if (this.pt === 10) { this.say('Round ' + this.round, PAPER, 62); sfx('bell'); }
         if (this.pt === 76) { this.say('Fight!', RED, 42); sfx('fight'); }
-        if (this.pt >= 90) { this.phase = 'fight'; this.pt = 0; const e = ctl.edge; e.atk = e.kick = e.dash = e.sup = false; }
+        if (this.pt >= 90) { this.phase = 'fight'; this.pt = 0; clearEdges(); }
         break;
       case 'fight':
         if (this.auto) { readPad(this.blank2 || (this.blank2 = blankInput())); Object.assign(this.inp, this.auto.think()); } else readPad(this.inp);   // 'auto' is a test hook: an AI plays for you
         w.step(this.inp, this.ai.think());
         this.frames++;
+        this.coach();
         if (w.hitstop <= 0) this.timer--;
         if (this.timer > 0 && this.timer <= 600 && this.timer % 60 === 0) sfx('tick');
         if (w.ko) { this.phase = 'ko'; this.pt = 0; this.say('K.O.', RED, 112, 1.5); }
@@ -3658,12 +4522,14 @@ const Fight = {
       g.fillStyle = INK; disc(px, gy + 1.5, 5.6); g.fillStyle = i < f.wins ? RED : '#55555d'; disc(px, gy + 1.5, 3.6);
     }
     stickFit(f.def.name, dir > 0 ? x - 1 : x + w + 1, y + h + 23, 9.5, w * 0.42, { align: dir > 0 ? 0 : 1, wt: 0.2 });
-    // super meter, weapon, ammo
-    const mw = 92, mx = dir > 0 ? x : x + w - mw, my = y + h + 30, full = f.meter >= 100;
-    g.fillStyle = INK; slabPath(mx - 2, my - 2, mw + 4, 9, 1.6); g.fill();
-    g.fillStyle = '#3a3a40'; slabPath(mx, my, mw, 5, 1); g.fill();
-    const fw = mw * clamp(f.meter / 100, 0, 1);
-    if (fw > 0.6) { g.fillStyle = full && tick % 12 < 6 ? PAPER : RED; slabPath(dir > 0 ? mx : mx + mw - fw, my, fw, 5, 1); g.fill(); }
+    // meter in three bars (special 1, special 2, super), then weapon and ammo
+    const mw = 96, mx = dir > 0 ? x : x + w - mw, my = y + h + 30, bw = (mw - 8) / 3;
+    for (let i = 0; i < 3; i++) {
+      const bx = dir > 0 ? mx + i * (bw + 4) : mx + mw - bw - i * (bw + 4), fr = clamp((f.meter - i * 100) / 100, 0, 1);
+      g.fillStyle = INK; slabPath(bx - 2, my - 2, bw + 4, 9, 1.6); g.fill();
+      g.fillStyle = '#3a3a40'; slabPath(bx, my, bw, 5, 1); g.fill();
+      if (fr > 0.03) { const fw = bw * fr; g.fillStyle = fr >= 1 ? (f.meter >= METER_MAX && tick % 12 < 6 ? PAPER : RED) : '#a3161d'; slabPath(dir > 0 ? bx : bx + bw - fw, my, fw, 5, 1); g.fill(); }
+    }
     const wx = dir > 0 ? mx + mw + 18 : mx - 18;
     drawWeaponIcon(f.weapon.id, wx, my + 2, 26, { h: 16 });
     const F = f.weapon.fire;
@@ -3710,27 +4576,58 @@ const Fight = {
   },
   drawPause() {
     if (this.overlay === 'help') {
-      if (drawHelp()) { this.overlay = null; if (!save.seenHelp) { save.seenHelp = true; writeSave(); this.paused = false; } }
+      if (drawHelp()) { this.overlay = null; if (!save.seenMoves) { save.seenMoves = true; save.seenHelp = true; writeSave(); this.paused = false; } }
       return;
     }
+    if (this.overlay === 'moves') { if (drawMoves(this.p1.weapon)) this.overlay = null; return; }
     if (this.overlay === 'options') { if (drawOptions(true)) this.overlay = null; return; }
-    const P = overlayPanel(308, 276, 'Paused');
+    const P = overlayPanel(308, 316, 'Paused');
     const x = P.x + 44, w = 220;
     let y = P.y + 62;
     if (button(x, y, w, 38, 'Resume', { kind: 'primary', key: ['Escape', 'KeyP', 'Enter'] })) this.paused = false;
     y += 48;
-    if (button(x, y, w, 32, 'Restart fight', { kind: 'plain', size: 10.5 })) go(Fight);
+    if (button(x, y, w, 32, 'Moves', { kind: 'plain', size: 10.5 })) this.overlay = 'moves';
     y += 41;
     if (button(x, y, w / 2 - 5, 32, 'Help', { kind: 'ghost', size: 10 })) this.overlay = 'help';
     if (button(x + w / 2 + 5, y, w / 2 - 5, 32, 'Options', { kind: 'ghost', size: 10 })) this.overlay = 'options';
     y += 41;
+    if (button(x, y, w, 32, 'Restart fight', { kind: 'ghost', size: 10 })) go(Fight);
+    y += 41;
     if (button(x, y, w, 32, 'Quit to timeline', { kind: 'ghost', size: 10, snd: 'uiBack' })) go(Ladder);
+  },
+  // the coaching line moves on when the player has done what it says
+  coach() {
+    if (save.tut >= COACH.length) return;
+    if (this.coachOk > 0) { if (--this.coachOk === 0) { save.tut++; if (save.tut >= COACH.length) save.tut = 99; writeSave(); this.coachT = 0; } return; }
+    this.coachT++;
+    if (COACH[save.tut].done(this.p1)) { this.coachOk = 34; sfx('uiOk'); }
+  },
+  drawCoach() {
+    if (save.tut >= COACH.length || this.phase !== 'fight' || this.paused) return;
+    const c = COACH[save.tut], f = this.p1, pad = !swipeMode(), gun = !!f.weapon.fire && c.gun;
+    let str = gun ? c.gun[pad ? 1 : 0] : pad ? c.pad : c.swipe;
+    if (c.wait && f.meter < 100) str = c.wait;
+    // sits on the floor between the meter buttons and the right-hand edge, clear of the fighters and of your thumbs
+    const left = pad ? 150 : ctl.btns[2].x + ctl.btns[2].r + 14, cx = view.W / 2, maxW = Math.min(360, 2 * (cx - left) - 56);
+    const lines = txtLines(str, 13.5, maxW, 700);
+    let tw = 0;
+    for (const l of lines) tw = Math.max(tw, g.measureText(l).width);
+    const n = lines.length, y = 277, hgt = n * 17 + 11, a = clamp(this.coachT / 14, 0, 1) * (this.coachOk ? this.coachOk / 34 : 1);
+    g.save(); g.globalAlpha = a;
+    g.fillStyle = 'rgba(0,0,0,0.72)'; slabPath(cx - tw / 2 - 34, y - 15, tw + 56, hgt, 3); g.fill();
+    g.fillStyle = this.coachOk ? PAPER : RED; slabPath(cx - tw / 2 - 34, y - 15, 5, hgt, 1); g.fill();
+    const my = y - 15 + hgt / 2;
+    if (this.coachOk) checkIcon(cx - tw / 2 - 16, my, 1, PAPER, 2.4);
+    else stickText(String(save.tut + 1), cx - tw / 2 - 16, my + 4.4, 8.5, { align: 0.5, rim: null, col: RED, wt: 0.2 });
+    for (let i = 0; i < n; i++) txt(lines[i], cx + 6, y + i * 17, 13.5, { align: 'center', w: 700 });
+    g.restore();
   },
   draw() {
     ctl.on = !this.paused && !this.ended;
     this.w.draw();
     this.drawHUD();
     this.drawMarks();
+    this.drawCoach();
     drawPad(this.p1);
     this.drawSay();
     if (this.paused) this.drawPause();
@@ -3789,7 +4686,7 @@ const Result = {
     if (r.won && r.n === LAST_TIER && r.first) note = 'That was the last stick. Ascension is now open on the timeline: an endless run of harder fights.';
     else if (r.won && !r.unlocked.length && !info.asc) note = r.first ? 'Nothing new this time. The next tier hits harder.' : 'Already cleared, so nothing new. Still counts as practice.';
     else if (r.won && info.asc) note = r.first ? 'New Ascension best. The next one is harder still.' : 'The next one is harder still.';
-    else if (!r.won) note = (r.n > 3 ? 'A different weapon changes the match-up: reach beats speed, a guard beats a flurry, a crouch beats bullets.' : 'Guard the first swing, then hit back while they recover.') + (save.lossCount < 5 ? ' They carry the bruises into the rematch, too: ' + Math.min(save.lossCount, 5) * 5 + '% less health.' : ' They start the rematch 25% down on health.');
+    else if (!r.won) note = (r.n > 3 ? 'A different weapon changes the match-up: reach beats speed, a guard beats a flurry, a slide goes under bullets.' : 'Guard the first swing, then hit back while they recover.') + (save.lossCount < 5 ? ' They carry the bruises into the rematch, too: ' + Math.min(save.lossCount, 5) * 5 + '% less health.' : ' They start the rematch 25% down on health.');
     if (note && t > 30) txtWrap(note, x, y + 14, 13.5, Math.min(w, 430), 18, { col: '#c9c9cf', w: 500 });
 
     const by = SB() - 46;
